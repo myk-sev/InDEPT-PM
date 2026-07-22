@@ -146,6 +146,24 @@ def normal_longitude(value: float) -> float:
     return value - 360 if value > 180 else value
 
 
+def format_bytes(value: int | str) -> str:
+    value = int(value or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return "0 B"
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "estimating"
+    seconds = max(0, round(seconds))
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radians = math.pi / 180
     lat1, lon1, lat2, lon2 = (value * radians for value in (lat1, lon1, lat2, lon2))
@@ -241,6 +259,14 @@ def configure(output: Path, locations_hash: str, start: date, end: date) -> None
     atomic_json(target, current)
 
 
+def jobs_between(start: date, end: date) -> list[tuple[date, int]]:
+    jobs = []
+    while start <= end:
+        jobs.extend((start, cycle) for cycle in CYCLES)
+        start += timedelta(days=1)
+    return jobs
+
+
 def run(args: argparse.Namespace) -> int:
     if args.setup_wgrib2:
         setup_wgrib2(args.wgrib2.parent)
@@ -261,35 +287,48 @@ def run(args: argparse.Namespace) -> int:
     if (args.output / "run_manifest.csv").exists():
         with (args.output / "run_manifest.csv").open(newline="", encoding="utf-8") as file:
             manifest = {f"{row['date']}T{row['cycle_utc']}": row for row in csv.DictReader(file)}
-    day = args.start
+    jobs = jobs_between(args.start, args.end)
+    complete_paths = {cycle_path(args.output, day, cycle) for day, cycle in jobs if valid_cycle(cycle_path(args.output, day, cycle), 72 * len(locations))}
+    pending_total = len(jobs) - len(complete_paths)
+    attempted = 0
+    durations: list[float] = []
+    started = time.monotonic()
     failures = 0
-    while day <= args.end:
-        for cycle in CYCLES:
-            key = f"{day.isoformat()}T{cycle:02d}"
-            destination = cycle_path(args.output, day, cycle)
-            source = source_url(day, cycle)
-            record: dict[str, object] = {"date": day.isoformat(), "cycle_utc": f"{cycle:02d}", "model_version": version_for(day), "source_url": source, "bytes": "", "etag": "", "rows": "", "error": ""}
-            if valid_cycle(destination, 72 * len(locations)):
-                manifest[key] = {**record, "status": "complete", "rows": 72 * len(locations)}
-            else:
-                grib = args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
-                try:
-                    size, etag = download_file(source, grib)
-                    rows = extract(args.wgrib2, grib, locations, day, cycle)
-                    write_cycle(destination, rows, source, etag)
-                    grib.unlink(missing_ok=True)
-                    manifest[key] = {**record, "status": "complete", "bytes": size, "etag": etag, "rows": len(rows)}
-                    print(f"Complete {key} ({len(rows)} rows)")
-                except HTTPError as error:
-                    manifest[key] = {**record, "status": "source_missing", "error": f"HTTP {error.code}"}
-                    print(f"Missing {key}")
-                except Exception as error:  # Keep working; reruns retry only failed cycles.
-                    failures += 1
-                    manifest[key] = {**record, "status": "failed", "error": str(error)}
-                    print(f"Failed {key}: {error}", file=sys.stderr)
-                finally:
-                    write_manifest(args.output, manifest)
-        day += timedelta(days=1)
+    for number, (day, cycle) in enumerate(jobs, 1):
+        key = f"{day.isoformat()}T{cycle:02d}"
+        destination = cycle_path(args.output, day, cycle)
+        source = source_url(day, cycle)
+        record: dict[str, object] = {"date": day.isoformat(), "cycle_utc": f"{cycle:02d}", "model_version": version_for(day), "source_url": source, "bytes": "", "etag": "", "rows": "", "error": ""}
+        if destination in complete_paths:
+            prior = manifest.get(key, {})
+            manifest[key] = {**record, **prior, "status": "complete", "rows": 72 * len(locations)}
+            eta = (sum(durations) / len(durations)) * (pending_total - attempted) if durations else None
+            print(f"[{number}/{len(jobs)}] Already complete {key} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}")
+            continue
+        cycle_started = time.monotonic()
+        message = ""
+        try:
+            size, etag = download_file(source, args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2")
+            grib = args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
+            rows = extract(args.wgrib2, grib, locations, day, cycle)
+            write_cycle(destination, rows, source, etag)
+            grib.unlink(missing_ok=True)
+            manifest[key] = {**record, "status": "complete", "bytes": size, "etag": etag, "rows": len(rows)}
+            message = f"Complete {key} ({len(rows)} rows, GRIB {format_bytes(size)})"
+        except HTTPError as error:
+            manifest[key] = {**record, "status": "source_missing", "error": f"HTTP {error.code}"}
+            message = f"Missing {key}"
+        except Exception as error:  # Keep working; reruns retry only failed cycles.
+            failures += 1
+            manifest[key] = {**record, "status": "failed", "error": str(error)}
+            message = f"Failed {key}: {error}"
+        finally:
+            durations.append(time.monotonic() - cycle_started)
+            attempted += 1
+            remaining = pending_total - attempted
+            eta = (sum(durations) / len(durations)) * remaining
+            print(f"[{number}/{len(jobs)}] {message} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}", file=sys.stderr if message.startswith("Failed") else sys.stdout)
+            write_manifest(args.output, manifest)
     return 1 if failures else 0
 
 
