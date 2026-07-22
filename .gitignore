@@ -1,0 +1,4 @@
+.tools/
+.naqfc_scratch/
+__pycache__/
+*.py[cod]
