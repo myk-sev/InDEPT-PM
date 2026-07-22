@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -114,6 +115,8 @@ def download_file(url: str, target: Path, retries: int = 5) -> tuple[int, str]:
     for attempt in range(retries):
         try:
             size, etag = remote_headers(url)
+            if target.exists() and target.stat().st_size == size:
+                return size, etag
             saved = json.loads(sidecar.read_text()) if sidecar.exists() else {}
             offset = partial.stat().st_size if partial.exists() and saved == {"url": url, "size": size, "etag": etag} else 0
             if offset == 0:
@@ -267,6 +270,11 @@ def jobs_between(start: date, end: date) -> list[tuple[date, int]]:
     return jobs
 
 
+def submit_download(executor: ThreadPoolExecutor, scratch: Path, day: date, cycle: int) -> Future[tuple[int, str]]:
+    target = scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
+    return executor.submit(download_file, source_url(day, cycle), target)
+
+
 def run(args: argparse.Namespace) -> int:
     if args.setup_wgrib2:
         setup_wgrib2(args.wgrib2.parent)
@@ -278,6 +286,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--start cannot be earlier than 2021-07-20; earlier forecasts are 48-hour")
     if args.end < args.start:
         raise ValueError("--end must not precede --start")
+    if not 1 <= args.download_workers <= 32:
+        raise ValueError("--download-workers must be between 1 and 32")
     args.output.mkdir(parents=True, exist_ok=True)
     configure(args.output, locations_hash, args.start, args.end)
     write_locations(args.output, locations)
@@ -289,46 +299,56 @@ def run(args: argparse.Namespace) -> int:
             manifest = {f"{row['date']}T{row['cycle_utc']}": row for row in csv.DictReader(file)}
     jobs = jobs_between(args.start, args.end)
     complete_paths = {cycle_path(args.output, day, cycle) for day, cycle in jobs if valid_cycle(cycle_path(args.output, day, cycle), 72 * len(locations))}
+    pending_jobs = [(day, cycle) for day, cycle in jobs if cycle_path(args.output, day, cycle) not in complete_paths]
     pending_total = len(jobs) - len(complete_paths)
     attempted = 0
     durations: list[float] = []
     started = time.monotonic()
     failures = 0
-    for number, (day, cycle) in enumerate(jobs, 1):
-        key = f"{day.isoformat()}T{cycle:02d}"
-        destination = cycle_path(args.output, day, cycle)
-        source = source_url(day, cycle)
-        record: dict[str, object] = {"date": day.isoformat(), "cycle_utc": f"{cycle:02d}", "model_version": version_for(day), "source_url": source, "bytes": "", "etag": "", "rows": "", "error": ""}
-        if destination in complete_paths:
-            prior = manifest.get(key, {})
-            manifest[key] = {**record, **prior, "status": "complete", "rows": 72 * len(locations)}
-            eta = (sum(durations) / len(durations)) * (pending_total - attempted) if durations else None
-            print(f"[{number}/{len(jobs)}] Already complete {key} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}")
-            continue
-        cycle_started = time.monotonic()
-        message = ""
-        try:
-            size, etag = download_file(source, args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2")
-            grib = args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
-            rows = extract(args.wgrib2, grib, locations, day, cycle)
-            write_cycle(destination, rows, source, etag)
-            grib.unlink(missing_ok=True)
-            manifest[key] = {**record, "status": "complete", "bytes": size, "etag": etag, "rows": len(rows)}
-            message = f"Complete {key} ({len(rows)} rows, GRIB {format_bytes(size)})"
-        except HTTPError as error:
-            manifest[key] = {**record, "status": "source_missing", "error": f"HTTP {error.code}"}
-            message = f"Missing {key}"
-        except Exception as error:  # Keep working; reruns retry only failed cycles.
-            failures += 1
-            manifest[key] = {**record, "status": "failed", "error": str(error)}
-            message = f"Failed {key}: {error}"
-        finally:
-            durations.append(time.monotonic() - cycle_started)
-            attempted += 1
-            remaining = pending_total - attempted
-            eta = (sum(durations) / len(durations)) * remaining
-            print(f"[{number}/{len(jobs)}] {message} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}", file=sys.stderr if message.startswith("Failed") else sys.stdout)
-            write_manifest(args.output, manifest)
+    pending = iter(pending_jobs)
+    futures: dict[tuple[date, int], Future[tuple[int, str]]] = {}
+    with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
+        for _ in range(min(args.download_workers, pending_total)):
+            job = next(pending)
+            futures[job] = submit_download(executor, args.scratch, *job)
+        for number, (day, cycle) in enumerate(jobs, 1):
+            key = f"{day.isoformat()}T{cycle:02d}"
+            destination = cycle_path(args.output, day, cycle)
+            source = source_url(day, cycle)
+            record: dict[str, object] = {"date": day.isoformat(), "cycle_utc": f"{cycle:02d}", "model_version": version_for(day), "source_url": source, "bytes": "", "etag": "", "rows": "", "error": ""}
+            if destination in complete_paths:
+                prior = manifest.get(key, {})
+                manifest[key] = {**record, **prior, "status": "complete", "rows": 72 * len(locations)}
+                eta = (sum(durations) / len(durations)) * (pending_total - attempted) if durations else None
+                print(f"[{number}/{len(jobs)}] Already complete {key} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}")
+                continue
+            cycle_started = time.monotonic()
+            message = ""
+            try:
+                size, etag = futures.pop((day, cycle)).result()
+                grib = args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
+                rows = extract(args.wgrib2, grib, locations, day, cycle)
+                write_cycle(destination, rows, source, etag)
+                grib.unlink(missing_ok=True)
+                manifest[key] = {**record, "status": "complete", "bytes": size, "etag": etag, "rows": len(rows)}
+                message = f"Complete {key} ({len(rows)} rows, GRIB {format_bytes(size)})"
+            except HTTPError as error:
+                manifest[key] = {**record, "status": "source_missing", "error": f"HTTP {error.code}"}
+                message = f"Missing {key}"
+            except Exception as error:  # Keep working; reruns retry only failed cycles.
+                failures += 1
+                manifest[key] = {**record, "status": "failed", "error": str(error)}
+                message = f"Failed {key}: {error}"
+            finally:
+                next_job = next(pending, None)
+                if next_job is not None:
+                    futures[next_job] = submit_download(executor, args.scratch, *next_job)
+                durations.append(time.monotonic() - cycle_started)
+                attempted += 1
+                remaining = pending_total - attempted
+                eta = (sum(durations) / len(durations)) * remaining
+                print(f"[{number}/{len(jobs)}] {message} | elapsed {format_duration(time.monotonic() - started)} | ETA {format_duration(eta)}", file=sys.stderr if message.startswith("Failed") else sys.stdout)
+                write_manifest(args.output, manifest)
     return 1 if failures else 0
 
 
@@ -339,6 +359,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--start", type=parse_date, default=START_DATE)
     parser.add_argument("--end", type=parse_date, default=utc_now_date())
     parser.add_argument("--scratch", type=Path, default=Path.cwd() / ".naqfc_scratch")
+    parser.add_argument("--download-workers", type=int, default=8, help="parallel downloads (default: 8)")
     parser.add_argument("--wgrib2", type=Path, default=Path.cwd() / ".tools" / "wgrib2" / "wgrib2.exe")
     parser.add_argument("--setup-wgrib2", action="store_true", help="download the official Windows wgrib2 files")
     return parser.parse_args()

@@ -27,16 +27,20 @@ latitude,longitude
 .venv\Scripts\python.exe pull_naqfc.py --locations locations.csv --output naqfc_output
 ```
 
+Eight forecasts download in parallel by default. Change the limit with
+`--download-workers`, for example `--download-workers 4`.
+
 Use `--start` and `--end` for a smaller run:
 
 ```bat
 .venv\Scripts\python.exe pull_naqfc.py --locations locations.csv --output naqfc_output --start 2024-01-01 --end 2024-01-31
 ```
 
-The pull is intentionally serial. For each 06Z or 12Z cycle it downloads one
-GRIB file, extracts all 72 forecast hours and every requested point in one
-decoder call, writes one long Parquet file, then removes the GRIB file. A
-restart skips valid completed Parquet files and retries failed or missing work.
+The pull keeps up to eight GRIB downloads in progress while extraction and
+Parquet writing remain serial. After each cycle is written, its GRIB file is
+removed and another download enters the bounded queue. A restart skips valid
+completed Parquet files, reuses complete GRIB files already in the scratch
+folder, and resumes matching `.part` downloads before retrying failed work.
 
 Output includes `locations.parquet`, `run_manifest.csv`, and cycle Parquet
 files partitioned by model version/year/month. Each row contains the original
