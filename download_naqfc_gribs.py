@@ -18,15 +18,22 @@ def grib_path(output: Path, day: date, cycle: int) -> Path:
     return output / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
 
 
-def write_manifest(output: Path, rows: dict[str, dict[str, object]]) -> None:
+def write_manifest(output: Path, rows: dict[str, dict[str, object]]) -> bool:
     fields = ("date", "cycle_utc", "model_version", "status", "source_url", "bytes", "etag", "error")
     target = output / "grib_manifest.csv"
     temporary = target.with_suffix(".csv.part")
-    with temporary.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows[key] for key in sorted(rows))
-    temporary.replace(target)
+    for _ in range(20):
+        try:
+            with temporary.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows[key] for key in sorted(rows))
+            temporary.replace(target)
+            return True
+        except PermissionError:
+            time.sleep(0.5)
+    print(f"Warning: OneDrive is locking {target.name}; progress will be written on a later cycle.", file=sys.stderr)
+    return False
 
 
 def submit(executor: ThreadPoolExecutor, output: Path, day: date, cycle: int) -> Future[tuple[int, str]]:

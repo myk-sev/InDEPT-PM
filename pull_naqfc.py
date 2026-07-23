@@ -240,15 +240,22 @@ def valid_cycle(path: Path, expected_rows: int) -> bool:
         return False
 
 
-def write_manifest(output: Path, manifest: dict[str, dict[str, object]]) -> None:
+def write_manifest(output: Path, manifest: dict[str, dict[str, object]]) -> bool:
     fields = ("date", "cycle_utc", "model_version", "status", "source_url", "bytes", "etag", "rows", "error")
     target = output / "run_manifest.csv"
     temporary = target.with_suffix(".csv.part")
-    with temporary.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(manifest[key] for key in sorted(manifest))
-    temporary.replace(target)
+    for _ in range(20):
+        try:
+            with temporary.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(manifest[key] for key in sorted(manifest))
+            temporary.replace(target)
+            return True
+        except PermissionError:
+            time.sleep(0.5)
+    print(f"Warning: OneDrive is locking {target.name}; progress will be written on a later cycle.", file=sys.stderr)
+    return False
 
 
 def configure(output: Path, locations_hash: str, start: date, end: date) -> None:
