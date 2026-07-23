@@ -54,12 +54,28 @@ def run(args: argparse.Namespace) -> int:
         with target.open(newline="", encoding="utf-8") as file:
             manifest = {f"{row['date']}T{row['cycle_utc']}": row for row in csv.DictReader(file)}
     jobs = jobs_between(args.start, args.end)
-    pending = iter(jobs)
+    complete_jobs = [(day, cycle) for day, cycle in jobs if grib_path(args.output, day, cycle).exists()]
+    pending_jobs = [(day, cycle) for day, cycle in jobs if not grib_path(args.output, day, cycle).exists()]
+    for day, cycle in complete_jobs:
+        key = f"{day.isoformat()}T{cycle:02d}"
+        prior = manifest.get(key, {})
+        manifest[key] = {
+            "date": day.isoformat(), "cycle_utc": f"{cycle:02d}",
+            "model_version": version_for(day), "status": "complete",
+            "source_url": source_url(day, cycle),
+            "bytes": grib_path(args.output, day, cycle).stat().st_size,
+            "etag": prior.get("etag", ""), "error": "",
+        }
+    if complete_jobs:
+        write_manifest(args.output, manifest)
+    print(f"Reusing {len(complete_jobs)} complete GRIBs; downloading {len(pending_jobs)} forecasts.")
+    pending = iter(pending_jobs)
     futures: dict[Future[tuple[int, str]], tuple[date, int]] = {}
     started = time.monotonic()
-    resolved = failures = 0
+    resolved = len(complete_jobs)
+    attempted = failures = 0
     with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
-        for _ in range(min(args.download_workers, len(jobs))):
+        for _ in range(min(args.download_workers, len(pending_jobs))):
             day, cycle = next(pending)
             futures[submit(executor, args.output, day, cycle)] = (day, cycle)
         while futures:
@@ -79,11 +95,12 @@ def run(args: argparse.Namespace) -> int:
                 manifest[key] = {**record, "status": "failed", "error": str(error)}
                 message = f"Failed {key}: {error}"
             resolved += 1
+            attempted += 1
             next_job = next(pending, None)
             if next_job is not None:
                 futures[submit(executor, args.output, *next_job)] = next_job
             elapsed = time.monotonic() - started
-            eta = elapsed / resolved * (len(jobs) - resolved)
+            eta = elapsed / attempted * (len(pending_jobs) - attempted)
             print(f"[{resolved}/{len(jobs)}] {message} | elapsed {format_duration(elapsed)} | ETA {format_duration(eta)}", file=sys.stderr if message.startswith("Failed") else sys.stdout)
             write_manifest(args.output, manifest)
     return 1 if failures else 0
