@@ -329,7 +329,8 @@ def run(args: argparse.Namespace) -> int:
                 grib = args.scratch / f"naqfc_{day:%Y%m%d}T{cycle:02d}.grib2"
                 rows = extract(args.wgrib2, grib, locations, day, cycle)
                 write_cycle(destination, rows, source, etag)
-                grib.unlink(missing_ok=True)
+                if not args.keep_grib:
+                    grib.unlink(missing_ok=True)
                 manifest[key] = {**record, "status": "complete", "bytes": size, "etag": etag, "rows": len(rows)}
                 message = f"Complete {key} ({len(rows)} rows, GRIB {format_bytes(size)})"
             except HTTPError as error:
@@ -360,6 +361,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--end", type=parse_date, default=utc_now_date())
     parser.add_argument("--scratch", type=Path, default=Path.cwd() / ".naqfc_scratch")
     parser.add_argument("--download-workers", type=int, default=8, help="parallel downloads (default: 8)")
+    parser.add_argument("--keep-grib", action="store_true", help="retain source GRIB files after Parquet extraction")
     parser.add_argument("--wgrib2", type=Path, default=Path.cwd() / ".tools" / "wgrib2" / "wgrib2.exe")
     parser.add_argument("--setup-wgrib2", action="store_true", help="download the official Windows wgrib2 files")
     return parser.parse_args()

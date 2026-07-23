@@ -46,3 +46,51 @@ Output includes `locations.parquet`, `run_manifest.csv`, and cycle Parquet
 files partitioned by model version/year/month. Each row contains the original
 coordinate, nearest-grid coordinate and distance, cycle and valid times,
 forecast hour, and `pm25_corrected_ug_m3`.
+
+## Retain the source forecasts for future coordinate sets
+
+The point pull normally deletes each GRIB after extracting it. To keep the full
+archive for later coordinate choices, download it once:
+
+```bat
+.venv\Scripts\python.exe download_naqfc_gribs.py --output naqfc_gribs
+```
+
+This requires roughly 206 GB of free disk space. It keeps every source GRIB,
+resumes `.part` files, and skips already-complete GRIBs. Generate a new
+coordinate-specific Parquet output from that local archive with a new output
+directory:
+
+```bat
+.venv\Scripts\python.exe pull_naqfc.py --locations new_locations.csv --output naqfc_output_v2 --scratch naqfc_gribs --keep-grib
+```
+
+## Read the Parquet data
+
+Read one forecast file with PyArrow:
+
+```python
+import pyarrow.parquet as pq
+
+table = pq.read_table("naqfc_output/model_version=AQMv7/year=2026/month=07/naqfc_20260722T06.parquet")
+```
+
+For all forecast files, select only the partitioned files. Do not scan the
+output root directly because it also contains the separate `locations.parquet`:
+
+```python
+from pathlib import Path
+import pyarrow.dataset as ds
+
+files = [str(path) for path in Path("naqfc_output").glob("model_version=*/year=*/month=*/*.parquet")]
+dataset = ds.dataset(files, format="parquet")
+table = dataset.to_table(columns=["location_id", "cycle_time_utc", "forecast_hour", "pm25_corrected_ug_m3"])
+```
+
+DuckDB can query all forecast files without loading the whole dataset into
+memory:
+
+```sql
+SELECT *
+FROM read_parquet('naqfc_output/model_version=*/year=*/month=*/*.parquet');
+```
