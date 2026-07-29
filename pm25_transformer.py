@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import random
 import time
@@ -492,6 +493,210 @@ def plot_prediction(
     plt.close(figure)
 
 
+def write_presentation_html(
+    output: Path,
+    sample: dict[str, torch.Tensor],
+    prediction: torch.Tensor,
+    config: ModelConfig,
+    location_id: str,
+    split: str,
+    sample_index: int,
+) -> None:
+    anchor = datetime.fromtimestamp(
+        int(sample["anchor_time_utc"]), timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+    payload = {
+        "historyHours": list(range(-config.history_hours + 1, 1)),
+        "futureHours": list(range(1, config.prediction_hours + 1)),
+        "outdoorHistory": sample["history"][:, 0].cpu().tolist(),
+        "indoorHistory": sample["history"][:, 1].cpu().tolist(),
+        "outdoorForecast": sample["forecast"].squeeze(1).cpu().tolist(),
+        "indoorActual": sample["target"].cpu().tolist(),
+        "indoorPrediction": prediction.detach().cpu().tolist(),
+        "location": location_id,
+        "anchor": anchor,
+        "split": split,
+        "sampleIndex": sample_index,
+        "historyLength": config.history_hours,
+        "predictionLength": config.prediction_hours,
+    }
+    data = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    document = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PM2.5 transformer forecast</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.7.0/plotly.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #f3f4f6;
+    color: #1f2937;
+    font-family: Aptos, "Segoe UI", sans-serif;
+  }
+  main {
+    width: min(1600px, 100%);
+    aspect-ratio: 16 / 9;
+    min-height: 620px;
+    margin: 0 auto;
+    background: #ffffff;
+  }
+  #pm25-chart { width: 100%; height: 100%; }
+  @media (max-width: 700px) {
+    main { min-height: 560px; aspect-ratio: auto; }
+  }
+  @media print {
+    @page { size: landscape; margin: 0; }
+    body, main { background: #ffffff; }
+    main { width: 100vw; height: 100vh; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div
+    id="pm25-chart"
+    role="img"
+    aria-label="Indoor and outdoor PM2.5 history with outdoor and indoor forecasts"
+  ></div>
+  <noscript>JavaScript is required to display the PM2.5 forecast chart.</noscript>
+</main>
+<script>
+const d = __PM25_DATA__;
+const traces = [
+  {
+    x: d.historyHours,
+    y: d.outdoorHistory,
+    name: "Observed outdoor history",
+    mode: "lines",
+    line: {color: "#3A8F5C", width: 3},
+    hovertemplate: "%{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
+  },
+  {
+    x: d.historyHours,
+    y: d.indoorHistory,
+    name: "Observed indoor history",
+    mode: "lines",
+    line: {color: "#3568B8", width: 3},
+    hovertemplate: "%{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
+  },
+  {
+    x: d.futureHours,
+    y: d.outdoorForecast,
+    xaxis: "x2",
+    name: "NAQFC outdoor forecast",
+    mode: "lines",
+    line: {color: "#3A8F5C", width: 3, dash: "dash"},
+    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
+  },
+  {
+    x: d.futureHours,
+    y: d.indoorActual,
+    xaxis: "x2",
+    name: "Actual indoor PM2.5",
+    mode: "lines",
+    line: {color: "#3568B8", width: 4},
+    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
+  },
+  {
+    x: d.futureHours,
+    y: d.indoorPrediction,
+    xaxis: "x2",
+    name: "Predicted indoor PM2.5",
+    mode: "lines",
+    line: {color: "#C44747", width: 4, dash: "dash"},
+    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
+  }
+];
+const layout = {
+  template: "plotly_white",
+  autosize: true,
+  margin: {l: 90, r: 45, t: 150, b: 90},
+  font: {family: 'Aptos, "Segoe UI", sans-serif', size: 16, color: "#1f2937"},
+  title: {
+    text: `<b>${d.location}</b><br><span style="font-size:16px">${d.anchor} · ${d.split} sample ${d.sampleIndex}</span>`,
+    x: 0.5,
+    xanchor: "center"
+  },
+  legend: {
+    orientation: "h",
+    x: 0.5,
+    xanchor: "center",
+    y: 1.08,
+    yanchor: "bottom"
+  },
+  hovermode: "closest",
+  paper_bgcolor: "#ffffff",
+  plot_bgcolor: "#ffffff",
+  xaxis: {
+    domain: [0, 0.31],
+    range: [-d.historyLength + 1, 0],
+    title: "Hours before forecast anchor",
+    showline: true,
+    mirror: true,
+    gridcolor: "#d9dde3",
+    zeroline: false
+  },
+  xaxis2: {
+    domain: [0.36, 1],
+    range: [0, d.predictionLength],
+    title: "Forecast lead hour",
+    showline: true,
+    mirror: true,
+    gridcolor: "#d9dde3",
+    zeroline: false
+  },
+  yaxis: {
+    title: "PM2.5 (µg/m³)",
+    rangemode: "tozero",
+    showline: true,
+    mirror: true,
+    gridcolor: "#d9dde3",
+    zeroline: false
+  },
+  annotations: [
+    {
+      text: `${d.historyLength}-hour observed history`,
+      x: 0.155, xref: "paper", y: 1.01, yref: "paper",
+      showarrow: false, font: {size: 15, color: "#4b5563"}
+    },
+    {
+      text: `${d.predictionLength}-hour forecast`,
+      x: 0.68, xref: "paper", y: 1.01, yref: "paper",
+      showarrow: false, font: {size: 15, color: "#4b5563"}
+    }
+  ],
+  shapes: [
+    {
+      type: "line",
+      xref: "x2", yref: "paper",
+      x0: 0, x1: 0, y0: 0, y1: 1,
+      line: {color: "#111827", width: 2, dash: "dot"}
+    }
+  ]
+};
+const options = {
+  responsive: true,
+  displaylogo: false,
+  scrollZoom: false,
+  modeBarButtonsToRemove: ["lasso2d", "select2d"],
+  toImageButtonOptions: {
+    format: "svg",
+    filename: "pm25-transformer-forecast",
+    scale: 1
+  }
+};
+Plotly.newPlot(document.getElementById("pm25-chart"), traces, layout, options);
+</script>
+</body>
+</html>
+""".replace("__PM25_DATA__", data)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(document, encoding="utf-8")
+
+
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
@@ -685,6 +890,17 @@ def infer(args: argparse.Namespace) -> None:
         args.sample_index,
     )
     print(f"saved diagnostic graph: {args.output}")
+    if args.presentation_output:
+        write_presentation_html(
+            args.presentation_output,
+            sample,
+            prediction,
+            config,
+            dataset.location_ids[location_index],
+            args.split,
+            args.sample_index,
+        )
+        print(f"saved presentation graph: {args.presentation_output}")
 
 
 def _add_stream_arguments(
@@ -798,6 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--sample-index", type=int, default=0)
     infer_parser.add_argument(
         "--output", type=Path, default=Path("pm25_inference.png")
+    )
+    infer_parser.add_argument(
+        "--presentation-output",
+        type=Path,
+        help="optional interactive Plotly.js HTML output",
     )
     infer_parser.add_argument("--device", default="auto")
     infer_parser.set_defaults(function=infer)
