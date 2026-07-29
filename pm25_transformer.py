@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import random
 import time
@@ -399,11 +398,28 @@ def plot_prediction(
     history = sample["history"].cpu().numpy()
     forecast = sample["forecast"].squeeze(1).cpu().numpy()
     target = sample["target"].cpu().numpy()
+    predicted = prediction.detach().cpu().numpy()
+    error = predicted - target
+    mae = float(np.mean(np.abs(error)))
+    rmse = float(np.sqrt(np.mean(error**2)))
+    displayed = np.concatenate(
+        (history[:, :2].ravel(), forecast, target, predicted)
+    )
+    padding = max(float(np.ptp(displayed)) * 0.08, 0.5)
+    y_limits = (
+        max(0, float(displayed.min()) - padding),
+        float(displayed.max()) + padding,
+    )
+    history_title = (
+        f"PAST {config.history_hours // 24} DAYS"
+        if config.history_hours % 24 == 0
+        else f"PAST {config.history_hours} HOURS"
+    )
     anchor = datetime.fromtimestamp(
         int(sample["anchor_time_utc"]), timezone.utc
     ).strftime("%Y-%m-%d %H:%M UTC")
 
-    sns.set_theme(style="whitegrid")
+    sns.set_theme(style="ticks")
     figure, (history_axis, forecast_axis) = plt.subplots(
         1,
         2,
@@ -415,27 +431,27 @@ def plot_prediction(
         (
             history_hours,
             history[:, 0],
-            "Observed outdoor history",
+            "Outdoor observed",
             "-",
-            "#55A868",
+            "#9C6B30",
         ),
         (
             history_hours,
             history[:, 1],
-            "Observed indoor history",
+            "Indoor observed",
             "-",
-            "#4C72B0",
+            "#40566F",
         ),
     )
     forecast_lines = (
-        (future_hours, forecast, "NAQFC outdoor forecast", "--", "#55A868"),
-        (future_hours, target, "Actual indoor PM2.5", "-", "#4C72B0"),
+        (future_hours, forecast, "Outdoor forecast", "--", "#9C6B30"),
+        (future_hours, target, "Indoor measured", "-", "#40566F"),
         (
             future_hours,
-            prediction.detach().cpu().numpy(),
-            "Predicted indoor PM2.5",
+            predicted,
+            "Model prediction",
             "--",
-            "#C44E52",
+            "#267873",
         ),
     )
     for axis, lines in (
@@ -449,17 +465,32 @@ def plot_prediction(
                 label=label,
                 linestyle=style,
                 color=color,
-                linewidth=2 if "indoor PM2.5" in label else 1.5,
+                linewidth=(
+                    2.25
+                    if label in {"Indoor measured", "Model prediction"}
+                    else 1.6
+                ),
                 ax=axis,
             )
 
     forecast_axis.axvline(
-        0, color="black", linestyle=":", label="Forecast anchor"
+        0, color="#555A60", linestyle=":", linewidth=1.5
+    )
+    forecast_axis.annotate(
+        "Forecast begins",
+        xy=(0, y_limits[1]),
+        xytext=(5, -4),
+        textcoords="offset points",
+        ha="left",
+        va="top",
+        color="#555A60",
+        fontsize=9,
     )
     history_axis.set(
-        xlabel="Hours before forecast anchor",
+        xlabel="Days before forecast",
         ylabel="PM2.5 (µg/m³)",
         xlim=(-config.history_hours + 1, 0),
+        ylim=y_limits,
     )
     forecast_axis.set(
         xlabel="Forecast lead hour",
@@ -469,6 +500,24 @@ def plot_prediction(
     history_axis.spines["right"].set_visible(False)
     forecast_axis.spines["left"].set_visible(False)
     forecast_axis.tick_params(axis="y", left=False)
+    history_axis.set_title(history_title, loc="left", fontsize=10, color="#555A60")
+    forecast_axis.set_title(
+        f"{config.prediction_hours}-HOUR HOLDOUT EVALUATION",
+        loc="left",
+        fontsize=10,
+        color="#555A60",
+    )
+    if config.history_hours == 168:
+        history_axis.set_xticks(
+            (-168, -120, -72, -24, 0),
+            ("−7 d", "−5 d", "−3 d", "−1 d", "0"),
+        )
+    forecast_axis.set_xticks(
+        np.arange(0, config.prediction_hours + 1, 6)
+    )
+    for axis in (history_axis, forecast_axis):
+        axis.grid(axis="y", color="#DFE3E7", linewidth=0.8)
+        axis.grid(axis="x", visible=False)
 
     handles = []
     labels = []
@@ -481,220 +530,29 @@ def plot_prediction(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.94),
-        ncol=3,
+        bbox_to_anchor=(0.5, 0.86),
+        ncol=5,
+        frameon=False,
+        fontsize=9,
     )
     figure.suptitle(
-        f"{location_id} | {anchor} | {split} sample {sample_index}", y=0.99
+        f"Model error averaged {mae:.2f} µg/m³ over {config.prediction_hours} hours",
+        y=0.99,
+        fontsize=16,
     )
-    figure.subplots_adjust(top=0.82, bottom=0.14, left=0.09, right=0.98)
+    figure.text(
+        0.5,
+        0.925,
+        f"{location_id} · {anchor} · retrospective {split} sample {sample_index} · RMSE {rmse:.2f} µg/m³",
+        ha="center",
+        color="#555A60",
+        fontsize=10,
+    )
+    figure.text(0.35, 0.14, "//", ha="center", color="#555A60", fontsize=13)
+    figure.subplots_adjust(top=0.77, bottom=0.14, left=0.09, right=0.98)
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=150)
     plt.close(figure)
-
-
-def write_presentation_html(
-    output: Path,
-    sample: dict[str, torch.Tensor],
-    prediction: torch.Tensor,
-    config: ModelConfig,
-    location_id: str,
-    split: str,
-    sample_index: int,
-) -> None:
-    anchor = datetime.fromtimestamp(
-        int(sample["anchor_time_utc"]), timezone.utc
-    ).strftime("%Y-%m-%d %H:%M UTC")
-    payload = {
-        "historyHours": list(range(-config.history_hours + 1, 1)),
-        "futureHours": list(range(1, config.prediction_hours + 1)),
-        "outdoorHistory": sample["history"][:, 0].cpu().tolist(),
-        "indoorHistory": sample["history"][:, 1].cpu().tolist(),
-        "outdoorForecast": sample["forecast"].squeeze(1).cpu().tolist(),
-        "indoorActual": sample["target"].cpu().tolist(),
-        "indoorPrediction": prediction.detach().cpu().tolist(),
-        "location": location_id,
-        "anchor": anchor,
-        "split": split,
-        "sampleIndex": sample_index,
-        "historyLength": config.history_hours,
-        "predictionLength": config.prediction_hours,
-    }
-    data = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
-    document = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PM2.5 transformer forecast</title>
-<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.7.0/plotly.min.js"></script>
-<style>
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: #f3f4f6;
-    color: #1f2937;
-    font-family: Aptos, "Segoe UI", sans-serif;
-  }
-  main {
-    width: min(1600px, 100%);
-    aspect-ratio: 16 / 9;
-    min-height: 620px;
-    margin: 0 auto;
-    background: #ffffff;
-  }
-  #pm25-chart { width: 100%; height: 100%; }
-  @media (max-width: 700px) {
-    main { min-height: 560px; aspect-ratio: auto; }
-  }
-  @media print {
-    @page { size: landscape; margin: 0; }
-    body, main { background: #ffffff; }
-    main { width: 100vw; height: 100vh; }
-  }
-</style>
-</head>
-<body>
-<main>
-  <div
-    id="pm25-chart"
-    role="img"
-    aria-label="Indoor and outdoor PM2.5 history with outdoor and indoor forecasts"
-  ></div>
-  <noscript>JavaScript is required to display the PM2.5 forecast chart.</noscript>
-</main>
-<script>
-const d = __PM25_DATA__;
-const traces = [
-  {
-    x: d.historyHours,
-    y: d.outdoorHistory,
-    name: "Observed outdoor history",
-    mode: "lines",
-    line: {color: "#3A8F5C", width: 3},
-    hovertemplate: "%{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
-  },
-  {
-    x: d.historyHours,
-    y: d.indoorHistory,
-    name: "Observed indoor history",
-    mode: "lines",
-    line: {color: "#3568B8", width: 3},
-    hovertemplate: "%{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
-  },
-  {
-    x: d.futureHours,
-    y: d.outdoorForecast,
-    xaxis: "x2",
-    name: "NAQFC outdoor forecast",
-    mode: "lines",
-    line: {color: "#3A8F5C", width: 3, dash: "dash"},
-    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
-  },
-  {
-    x: d.futureHours,
-    y: d.indoorActual,
-    xaxis: "x2",
-    name: "Actual indoor PM2.5",
-    mode: "lines",
-    line: {color: "#3568B8", width: 4},
-    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
-  },
-  {
-    x: d.futureHours,
-    y: d.indoorPrediction,
-    xaxis: "x2",
-    name: "Predicted indoor PM2.5",
-    mode: "lines",
-    line: {color: "#C44747", width: 4, dash: "dash"},
-    hovertemplate: "Lead %{x} h<br>%{y:.2f} µg/m³<extra>%{fullData.name}</extra>"
-  }
-];
-const layout = {
-  template: "plotly_white",
-  autosize: true,
-  margin: {l: 90, r: 45, t: 150, b: 90},
-  font: {family: 'Aptos, "Segoe UI", sans-serif', size: 16, color: "#1f2937"},
-  title: {
-    text: `<b>${d.location}</b><br><span style="font-size:16px">${d.anchor} · ${d.split} sample ${d.sampleIndex}</span>`,
-    x: 0.5,
-    xanchor: "center"
-  },
-  legend: {
-    orientation: "h",
-    x: 0.5,
-    xanchor: "center",
-    y: 1.08,
-    yanchor: "bottom"
-  },
-  hovermode: "closest",
-  paper_bgcolor: "#ffffff",
-  plot_bgcolor: "#ffffff",
-  xaxis: {
-    domain: [0, 0.31],
-    range: [-d.historyLength + 1, 0],
-    title: "Hours before forecast anchor",
-    showline: true,
-    mirror: true,
-    gridcolor: "#d9dde3",
-    zeroline: false
-  },
-  xaxis2: {
-    domain: [0.36, 1],
-    range: [0, d.predictionLength],
-    title: "Forecast lead hour",
-    showline: true,
-    mirror: true,
-    gridcolor: "#d9dde3",
-    zeroline: false
-  },
-  yaxis: {
-    title: "PM2.5 (µg/m³)",
-    rangemode: "tozero",
-    showline: true,
-    mirror: true,
-    gridcolor: "#d9dde3",
-    zeroline: false
-  },
-  annotations: [
-    {
-      text: `${d.historyLength}-hour observed history`,
-      x: 0.155, xref: "paper", y: 1.01, yref: "paper",
-      showarrow: false, font: {size: 15, color: "#4b5563"}
-    },
-    {
-      text: `${d.predictionLength}-hour forecast`,
-      x: 0.68, xref: "paper", y: 1.01, yref: "paper",
-      showarrow: false, font: {size: 15, color: "#4b5563"}
-    }
-  ],
-  shapes: [
-    {
-      type: "line",
-      xref: "x2", yref: "paper",
-      x0: 0, x1: 0, y0: 0, y1: 1,
-      line: {color: "#111827", width: 2, dash: "dot"}
-    }
-  ]
-};
-const options = {
-  responsive: true,
-  displaylogo: false,
-  scrollZoom: false,
-  modeBarButtonsToRemove: ["lasso2d", "select2d"],
-  toImageButtonOptions: {
-    format: "svg",
-    filename: "pm25-transformer-forecast",
-    scale: 1
-  }
-};
-Plotly.newPlot(document.getElementById("pm25-chart"), traces, layout, options);
-</script>
-</body>
-</html>
-""".replace("__PM25_DATA__", data)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(document, encoding="utf-8")
 
 
 def resolve_device(name: str) -> torch.device:
@@ -890,18 +748,6 @@ def infer(args: argparse.Namespace) -> None:
         args.sample_index,
     )
     print(f"saved diagnostic graph: {args.output}")
-    if args.presentation_output:
-        write_presentation_html(
-            args.presentation_output,
-            sample,
-            prediction,
-            config,
-            dataset.location_ids[location_index],
-            args.split,
-            args.sample_index,
-        )
-        print(f"saved presentation graph: {args.presentation_output}")
-
 
 def _add_stream_arguments(
     parser: argparse.ArgumentParser, stream: str, patches: bool
@@ -1014,11 +860,6 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--sample-index", type=int, default=0)
     infer_parser.add_argument(
         "--output", type=Path, default=Path("pm25_inference.png")
-    )
-    infer_parser.add_argument(
-        "--presentation-output",
-        type=Path,
-        help="optional interactive Plotly.js HTML output",
     )
     infer_parser.add_argument("--device", default="auto")
     infer_parser.set_defaults(function=infer)
