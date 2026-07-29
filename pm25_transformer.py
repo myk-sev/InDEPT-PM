@@ -403,8 +403,14 @@ def plot_prediction(
     ).strftime("%Y-%m-%d %H:%M UTC")
 
     sns.set_theme(style="whitegrid")
-    figure, axis = plt.subplots(figsize=(12, 6))
-    lines = (
+    figure, (history_axis, forecast_axis) = plt.subplots(
+        1,
+        2,
+        figsize=(12, 6),
+        sharey=True,
+        gridspec_kw={"width_ratios": (1, 2), "wspace": 0.05},
+    )
+    history_lines = (
         (
             history_hours,
             history[:, 0],
@@ -419,6 +425,8 @@ def plot_prediction(
             "-",
             "#4C72B0",
         ),
+    )
+    forecast_lines = (
         (future_hours, forecast, "NAQFC outdoor forecast", "--", "#55A868"),
         (future_hours, target, "Actual indoor PM2.5", "-", "#4C72B0"),
         (
@@ -429,24 +437,56 @@ def plot_prediction(
             "#C44E52",
         ),
     )
-    for hours, values, label, style, color in lines:
-        sns.lineplot(
-            x=hours,
-            y=values,
-            label=label,
-            linestyle=style,
-            color=color,
-            linewidth=2 if "indoor PM2.5" in label else 1.5,
-            ax=axis,
-        )
-    axis.axvline(0, color="black", linestyle=":", label="Forecast anchor")
-    axis.set(
-        xlabel="Hours relative to forecast anchor",
-        ylabel="PM2.5 (µg/m³)",
-        title=f"{location_id} | {anchor} | {split} sample {sample_index}",
+    for axis, lines in (
+        (history_axis, history_lines),
+        (forecast_axis, forecast_lines),
+    ):
+        for hours, values, label, style, color in lines:
+            sns.lineplot(
+                x=hours,
+                y=values,
+                label=label,
+                linestyle=style,
+                color=color,
+                linewidth=2 if "indoor PM2.5" in label else 1.5,
+                ax=axis,
+            )
+
+    forecast_axis.axvline(
+        0, color="black", linestyle=":", label="Forecast anchor"
     )
-    axis.legend()
-    figure.tight_layout()
+    history_axis.set(
+        xlabel="Hours before forecast anchor",
+        ylabel="PM2.5 (µg/m³)",
+        xlim=(-config.history_hours + 1, 0),
+    )
+    forecast_axis.set(
+        xlabel="Forecast lead hour",
+        ylabel="",
+        xlim=(0, config.prediction_hours),
+    )
+    history_axis.spines["right"].set_visible(False)
+    forecast_axis.spines["left"].set_visible(False)
+    forecast_axis.tick_params(axis="y", left=False)
+
+    handles = []
+    labels = []
+    for axis in (history_axis, forecast_axis):
+        axis_handles, axis_labels = axis.get_legend_handles_labels()
+        handles.extend(axis_handles)
+        labels.extend(axis_labels)
+        axis.get_legend().remove()
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=3,
+    )
+    figure.suptitle(
+        f"{location_id} | {anchor} | {split} sample {sample_index}", y=0.99
+    )
+    figure.subplots_adjust(top=0.82, bottom=0.14, left=0.09, right=0.98)
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=150)
     plt.close(figure)
