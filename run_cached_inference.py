@@ -1,6 +1,7 @@
 """Run a trained model and create graphs from a compact inference cache."""
 
 import argparse
+import re
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from pm25_transformer import (
 
 
 CACHE_FORMAT_VERSION = 1
+NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +53,12 @@ def main() -> None:
     by_index = {record["sample_index"]: record for record in records}
     if len(by_index) != len(records):
         raise ValueError("inference cache contains duplicate sample indices")
+    names = [record.get("name") for record in records if record.get("name")]
+    if len(set(names)) != len(names) or any(
+        not isinstance(name, str) or not NAME_PATTERN.fullmatch(name)
+        for name in names
+    ):
+        raise ValueError("inference cache contains invalid or duplicate sample names")
 
     requested = args.indices if args.indices is not None else list(by_index)
     if len(set(requested)) != len(requested):
@@ -80,10 +88,13 @@ def main() -> None:
     split = cache["split"]
     for record, prediction in zip(selected, predictions):
         index = record["sample_index"]
-        output = (
-            args.output_dir
-            / f"{split.replace('-', '_')}_sample_{index}.png"
+        name = record.get("name")
+        filename = (
+            f"{name}.png"
+            if name
+            else f"{split.replace('-', '_')}_sample_{index}.png"
         )
+        output = args.output_dir / filename
         plot_prediction(
             output,
             record["sample"],
@@ -93,7 +104,8 @@ def main() -> None:
             split,
             index,
         )
-        print(f"saved sample {index}: {output}")
+        label = f"{name}={index}" if name else str(index)
+        print(f"saved sample {label}: {output}")
 
     print(
         f"device={device} samples={len(selected)} "

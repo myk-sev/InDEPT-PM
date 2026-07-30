@@ -2,3 +2,9 @@
 .naqfc_scratch/
 __pycache__/
 *.py[cod]
+
+*.pt
+*.csv
+*.png
+*.txt
+!requirements.txt

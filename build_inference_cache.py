@@ -1,6 +1,7 @@
 """Cache selected retrospective inference samples from a trained checkpoint."""
 
 import argparse
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from pm25_transformer import build_loaders, file_sha256, load_checkpoint
 
 
 CACHE_FORMAT_VERSION = 1
+NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 SPLITS = ("train", "validation", "temporal-test", "location-test")
 
 
@@ -21,17 +23,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--split", choices=SPLITS, default="temporal-test")
-    parser.add_argument("--indices", type=int, nargs="+", required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--indices", type=int, nargs="+")
+    selection.add_argument(
+        "--samples",
+        nargs="+",
+        metavar="NAME=INDEX",
+        help="named samples, such as normal=6281 wildfire_incoming=2445",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
 
+def parse_samples(args: argparse.Namespace) -> list[tuple[str | None, int]]:
+    if args.indices is not None:
+        samples = [(None, index) for index in args.indices]
+    else:
+        samples = []
+        for value in args.samples:
+            name, separator, text = value.partition("=")
+            if not separator or not NAME_PATTERN.fullmatch(name):
+                raise ValueError(
+                    f"invalid named sample {value!r}; use NAME=INDEX with letters, "
+                    "numbers, underscores, or hyphens"
+                )
+            try:
+                samples.append((name, int(text)))
+            except ValueError as error:
+                raise ValueError(f"invalid sample index in {value!r}") from error
+
+    names = [name for name, _ in samples if name is not None]
+    indices = [index for _, index in samples]
+    if any(index < 0 for index in indices):
+        raise ValueError("indices cannot be negative")
+    if len(set(indices)) != len(indices):
+        raise ValueError("indices must be unique")
+    if len(set(names)) != len(names):
+        raise ValueError("sample names must be unique")
+    return samples
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    if any(index < 0 for index in args.indices):
-        raise ValueError("indices cannot be negative")
-    if len(set(args.indices)) != len(args.indices):
-        raise ValueError("indices must be unique")
+    requested_samples = parse_samples(args)
+    indices = [index for _, index in requested_samples]
 
     started = time.perf_counter()
     device = torch.device("cpu")
@@ -56,7 +91,7 @@ def main() -> None:
             raise ValueError("balanced training index does not match the checkpoint")
 
     print(
-        f"loading {args.split} data for {len(args.indices)} requested samples..."
+        f"loading {args.split} data for {len(requested_samples)} requested samples..."
     )
     dataset, loaders = build_loaders(
         Path(training_config["pairs"]),
@@ -69,7 +104,7 @@ def main() -> None:
         balanced_path,
     )
     loader = getattr(loaders, args.split.replace("-", "_"))
-    invalid = [index for index in args.indices if index >= len(loader.dataset)]
+    invalid = [index for index in indices if index >= len(loader.dataset)]
     if invalid:
         raise IndexError(
             f"indices exceed the {args.split} maximum of "
@@ -77,11 +112,12 @@ def main() -> None:
         )
 
     records = []
-    for completed, index in enumerate(args.indices, 1):
+    for completed, (name, index) in enumerate(requested_samples, 1):
         sample = loader.dataset[index]
         location = int(sample["location_index"])
         records.append(
             {
+                "name": name,
                 "sample_index": index,
                 "location_id": dataset.location_ids[location],
                 "sensor_id": dataset.sensor_ids[location],
@@ -96,7 +132,8 @@ def main() -> None:
                 },
             }
         )
-        print(f"cached {completed}/{len(args.indices)}: sample {index}")
+        label = f"{name}={index}" if name is not None else str(index)
+        print(f"cached {completed}/{len(requested_samples)}: sample {label}")
 
     cache = {
         "format_version": CACHE_FORMAT_VERSION,
