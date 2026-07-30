@@ -616,17 +616,27 @@ def set_seed(seed: int) -> None:
 
 
 def build_loaders(
-    observations: Path,
+    pairs: Path,
+    indoor_history: list[Path],
+    outdoor_history: Path,
     forecast_root: Path,
     config: ModelConfig,
     training_config: dict,
     device: torch.device,
 ) -> tuple[DualEncoderDataset, DualEncoderLoaders]:
     dataset = DualEncoderDataset(
-        observations,
+        pairs,
+        indoor_history,
+        outdoor_history,
         forecast_root,
         history_hours=config.history_hours,
         forecast_hours=config.prediction_hours,
+        minimum_outdoor_history_hours=training_config.get(
+            "minimum_outdoor_history_hours", 24
+        ),
+        maximum_outdoor_age_hours=training_config.get(
+            "maximum_outdoor_age_hours", 48
+        ),
     )
     loaders = create_data_loaders(
         dataset,
@@ -657,7 +667,9 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = resolve_device(args.device)
     training_config = {
-        "observations": str(args.observations.resolve()),
+        "pairs": str(args.pairs.resolve()),
+        "indoor_history": [str(path.resolve()) for path in args.indoor_history],
+        "outdoor_history": str(args.outdoor_history.resolve()),
         "forecast_root": str(args.forecast_root.resolve()),
         "batch_size": args.batch_size,
         "train_fraction": args.train_fraction,
@@ -673,9 +685,17 @@ def train(args: argparse.Namespace) -> None:
         "early_stopping_patience": args.early_stopping_patience,
         "epochs": args.epochs,
         "device": args.device,
+        "minimum_outdoor_history_hours": args.minimum_outdoor_history_hours,
+        "maximum_outdoor_age_hours": args.maximum_outdoor_age_hours,
     }
     _, loaders = build_loaders(
-        args.observations, args.forecast_root, config, training_config, device
+        args.pairs,
+        args.indoor_history,
+        args.outdoor_history,
+        args.forecast_root,
+        config,
+        training_config,
+        device,
     )
     zscores = fit_zscores(loaders.train)
     model = DualEncoderPatchTransformer(config).to(device)
@@ -757,7 +777,9 @@ def infer(args: argparse.Namespace) -> None:
     training_config["batch_size"] = 1
     training_config["num_workers"] = 0
     dataset, loaders = build_loaders(
-        args.observations,
+        args.pairs,
+        args.indoor_history,
+        args.outdoor_history,
         args.forecast_root,
         config,
         training_config,
@@ -865,11 +887,17 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser = commands.add_parser(
         "train", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    train_parser.add_argument("--observations", type=Path, required=True)
+    train_parser.add_argument("--pairs", type=Path, required=True)
+    train_parser.add_argument(
+        "--indoor-history", type=Path, action="append", required=True
+    )
+    train_parser.add_argument("--outdoor-history", type=Path, required=True)
     train_parser.add_argument("--forecast-root", type=Path, required=True)
     train_parser.add_argument("--checkpoint", type=Path, required=True)
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
+    train_parser.add_argument("--minimum-outdoor-history-hours", type=int, default=24)
+    train_parser.add_argument("--maximum-outdoor-age-hours", type=int, default=48)
     _add_stream_arguments(train_parser, "history", True)
     _add_stream_arguments(train_parser, "forecast", True)
     _add_stream_arguments(train_parser, "decoder", False)
@@ -894,7 +922,11 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser = commands.add_parser(
         "infer", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    infer_parser.add_argument("--observations", type=Path, required=True)
+    infer_parser.add_argument("--pairs", type=Path, required=True)
+    infer_parser.add_argument(
+        "--indoor-history", type=Path, action="append", required=True
+    )
+    infer_parser.add_argument("--outdoor-history", type=Path, required=True)
     infer_parser.add_argument("--forecast-root", type=Path, required=True)
     infer_parser.add_argument("--checkpoint", type=Path, required=True)
     infer_parser.add_argument(
