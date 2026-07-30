@@ -17,6 +17,9 @@ from torch.nn import functional as F
 from data_loader import DualEncoderDataset, DualEncoderLoaders, create_data_loaders
 
 
+CHECKPOINT_FORMAT_VERSION = 2
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     history_hours: int = 168
@@ -144,7 +147,7 @@ class DualEncoderPatchTransformer(nn.Module):
         self.config = config
         self.history_patches = PatchEmbedding(
             config.history_hours,
-            6,
+            8,
             config.history_patch_size,
             config.history_patch_stride,
             config.history_embedding_dim,
@@ -191,6 +194,7 @@ class DualEncoderPatchTransformer(nn.Module):
     def forward(
         self, history: torch.Tensor, forecast: torch.Tensor
     ) -> torch.Tensor:
+        history = _missing_aware_history(history)
         history_memory = self.history_projection(
             self.history_encoder(self.history_patches(history))
         )
@@ -200,6 +204,28 @@ class DualEncoderPatchTransformer(nn.Module):
         memory = torch.cat((history_memory, forecast_memory), dim=1)
         queries = self.queries.expand(history.shape[0], -1, -1)
         return self.output(self.decoder(queries, memory)).squeeze(-1)
+
+
+def _missing_aware_history(history: torch.Tensor) -> torch.Tensor:
+    """Append availability and normalized recency to normalized history."""
+    if history.ndim != 3 or history.shape[2] != 6:
+        raise ValueError(
+            "history must contain outdoor PM2.5, indoor PM2.5, and four time features"
+        )
+
+    available = torch.isfinite(history[..., :1])
+    steps = torch.arange(
+        history.shape[1], device=history.device, dtype=torch.int64
+    ).view(1, -1, 1)
+    last_seen = torch.where(available, steps, -history.shape[1])
+    last_seen = torch.cummax(last_seen, dim=1).values
+    recency = (steps - last_seen).clamp(max=history.shape[1])
+    recency = recency.to(history.dtype) / history.shape[1]
+    outdoor = torch.where(available, history[..., :1], 0.0)
+    return torch.cat(
+        (outdoor, history[..., 1:], available.to(history.dtype), recency),
+        dim=2,
+    )
 
 
 def _encoder(config: ModelConfig, stream: str) -> nn.TransformerEncoder:
@@ -227,8 +253,10 @@ def _encoder(config: ModelConfig, stream: str) -> nn.TransformerEncoder:
 class ZScores:
     indoor_mean: float
     indoor_std: float
-    outdoor_mean: float
-    outdoor_std: float
+    history_outdoor_mean: float
+    history_outdoor_std: float
+    forecast_mean: float
+    forecast_std: float
 
     def denormalize_indoor(self, values: torch.Tensor) -> torch.Tensor:
         return values * self.indoor_std + self.indoor_mean
@@ -236,19 +264,29 @@ class ZScores:
 
 def fit_zscores(batches: Iterable[dict[str, torch.Tensor]]) -> ZScores:
     indoor = [0.0, 0.0, 0]
-    outdoor = [0.0, 0.0, 0]
+    history_outdoor = [0.0, 0.0, 0]
+    forecast = [0.0, 0.0, 0]
     for batch in batches:
         _accumulate(indoor, batch["history"][..., 1])
         _accumulate(indoor, batch["target"])
-        _accumulate(outdoor, batch["history"][..., 0])
-        _accumulate(outdoor, batch["forecast"])
+        _accumulate(history_outdoor, batch["history"][..., 0])
+        _accumulate(forecast, batch["forecast"])
     indoor_mean, indoor_std = _mean_std(indoor, "indoor")
-    outdoor_mean, outdoor_std = _mean_std(outdoor, "outdoor")
-    return ZScores(indoor_mean, indoor_std, outdoor_mean, outdoor_std)
+    history_mean, history_std = _mean_std(history_outdoor, "historical outdoor")
+    forecast_mean, forecast_std = _mean_std(forecast, "forecast")
+    return ZScores(
+        indoor_mean,
+        indoor_std,
+        history_mean,
+        history_std,
+        forecast_mean,
+        forecast_std,
+    )
 
 
 def _accumulate(total: list[float | int], values: torch.Tensor) -> None:
     values = values.detach().double()
+    values = values[torch.isfinite(values)]
     total[0] += values.sum().item()
     total[1] += values.square().sum().item()
     total[2] += values.numel()
@@ -273,9 +311,11 @@ def normalize_batch(
     history = batch["history"].to(device, non_blocking=True).clone()
     forecast = batch["forecast"].to(device, non_blocking=True).clone()
     target = batch["target"].to(device, non_blocking=True).clone()
-    history[..., 0].sub_(zscores.outdoor_mean).div_(zscores.outdoor_std)
+    history[..., 0].sub_(zscores.history_outdoor_mean).div_(
+        zscores.history_outdoor_std
+    )
     history[..., 1].sub_(zscores.indoor_mean).div_(zscores.indoor_std)
-    forecast.sub_(zscores.outdoor_mean).div_(zscores.outdoor_std)
+    forecast.sub_(zscores.forecast_mean).div_(zscores.forecast_std)
     target.sub_(zscores.indoor_mean).div_(zscores.indoor_std)
     return history, forecast, target
 
@@ -352,7 +392,7 @@ def save_checkpoint(
     temporary = path.with_name(f"{path.name}.tmp")
     torch.save(
         {
-            "format_version": 1,
+            "format_version": CHECKPOINT_FORMAT_VERSION,
             "model_config": asdict(config),
             "normalization": asdict(zscores),
             "training_config": training_config,
@@ -369,8 +409,10 @@ def load_checkpoint(
     path: Path, device: torch.device
 ) -> tuple[DualEncoderPatchTransformer, ModelConfig, ZScores, dict]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    if checkpoint.get("format_version") != 1:
-        raise ValueError("unsupported checkpoint format")
+    if checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(
+            "checkpoint predates the missing-aware history architecture; retrain it"
+        )
     config = ModelConfig(**checkpoint["model_config"])
     zscores = ZScores(**checkpoint["normalization"])
     model = DualEncoderPatchTransformer(config).to(device)
@@ -405,6 +447,7 @@ def plot_prediction(
     displayed = np.concatenate(
         (history[:, :2].ravel(), forecast, target, predicted)
     )
+    displayed = displayed[np.isfinite(displayed)]
     padding = max(float(np.ptp(displayed)) * 0.08, 0.5)
     y_limits = (
         max(0, float(displayed.min()) - padding),
@@ -650,8 +693,10 @@ def train(args: argparse.Namespace) -> None:
     print(
         f"indoor z-score mean={zscores.indoor_mean:.6g} "
         f"std={zscores.indoor_std:.6g}; "
-        f"outdoor mean={zscores.outdoor_mean:.6g} "
-        f"std={zscores.outdoor_std:.6g}"
+        f"historical outdoor mean={zscores.history_outdoor_mean:.6g} "
+        f"std={zscores.history_outdoor_std:.6g}; "
+        f"forecast mean={zscores.forecast_mean:.6g} "
+        f"std={zscores.forecast_std:.6g}"
     )
 
     best_loss = math.inf
