@@ -600,10 +600,17 @@ def plot_prediction(
 
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
-        name = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            name = "cuda"
+        elif torch.xpu.is_available():
+            name = "xpu"
+        else:
+            name = "cpu"
     device = torch.device(name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA was requested but is not available")
+    if device.type == "xpu" and not torch.xpu.is_available():
+        raise ValueError("XPU was requested but is not available")
     return device
 
 
@@ -646,7 +653,7 @@ def build_loaders(
         location_holdout_fraction=training_config["location_holdout_fraction"],
         seed=training_config["seed"],
         num_workers=training_config["num_workers"],
-        pin_memory=device.type == "cuda",
+        pin_memory=device.type in {"cuda", "xpu"},
     )
     return dataset, loaders
 
