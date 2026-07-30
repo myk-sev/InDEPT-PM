@@ -600,7 +600,11 @@ def plot_prediction(
 
 
 def plot_training_losses(
-    output: Path, training_losses: list[float], validation_losses: list[float]
+    output: Path,
+    training_losses: list[float],
+    validation_losses: list[float],
+    training_metrics: dict[str, float],
+    validation_metrics: dict[str, float],
 ) -> None:
     import matplotlib
 
@@ -609,8 +613,16 @@ def plot_training_losses(
 
     epochs = range(1, len(training_losses) + 1)
     figure, axis = plt.subplots(figsize=(8, 5))
-    axis.plot(epochs, training_losses, marker="o", label="Training loss")
-    axis.plot(epochs, validation_losses, marker="s", label="Validation loss")
+    for name, losses, marker, metrics in (
+        ("Training", training_losses, "o", training_metrics),
+        ("Validation", validation_losses, "s", validation_metrics),
+    ):
+        label = (
+            f"{name} — final loss={metrics['loss']:.4g}, "
+            f"MAE={metrics['mae']:.4g}, MSE={metrics['mse']:.4g}, "
+            f"RMSE={metrics['rmse']:.4g}"
+        )
+        axis.plot(epochs, losses, marker=marker, label=label)
     axis.set(xlabel="Epoch", ylabel="Loss", title="Training and validation loss")
     axis.set_xticks(list(epochs))
     axis.grid(alpha=0.3)
@@ -848,7 +860,9 @@ def train(args: argparse.Namespace) -> None:
                 print(f"early stopping after {epoch} epochs")
                 break
     loss_plot = args.checkpoint.with_suffix(".loss.png")
-    plot_training_losses(loss_plot, training_losses, validation_losses)
+    plot_training_losses(
+        loss_plot, training_losses, validation_losses, training, validation
+    )
     print(
         f"best_{args.loss}={best_loss:.6g} checkpoint={args.checkpoint} "
         f"loss_plot={loss_plot} "
