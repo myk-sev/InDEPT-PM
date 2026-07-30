@@ -61,6 +61,7 @@ class DualEncoderDataset(Dataset):
         forecast_hours: int = 36,
         minimum_outdoor_history_hours: int = 24,
         maximum_outdoor_age_hours: int = 48,
+        excluded_sensors_path: str | Path | None = None,
     ) -> None:
         if history_hours < 1 or forecast_hours < 1:
             raise ValueError("history_hours and forecast_hours must be positive")
@@ -75,14 +76,22 @@ class DualEncoderDataset(Dataset):
         self.forecast_hours = forecast_hours
         self.minimum_outdoor_history_hours = minimum_outdoor_history_hours
         self.maximum_outdoor_age_hours = maximum_outdoor_age_hours
-        pairs = _read_pairs(Path(pairs_path))
+        all_pairs = _read_pairs(Path(pairs_path))
+        excluded = (
+            _read_excluded_sensors(Path(excluded_sensors_path))
+            if excluded_sensors_path is not None
+            else set()
+        )
+        pairs = [pair for pair in all_pairs if pair[1] not in excluded]
+        if not pairs:
+            raise ValueError("excluded sensor list removes every pair")
         location_ids = [pair[0] for pair in pairs]
         sensor_ids = [pair[1] for pair in pairs]
         indoor = _read_indoor_history(_paths(indoor_history), sensor_ids)
         outdoor = _read_outdoor_history(Path(outdoor_history_path), sensor_ids)
         timestamps, observations = _observations(sensor_ids, indoor, outdoor)
         cycles, forecasts = _read_forecasts(Path(forecast_root), location_ids)
-        _validate_forecast_locations(Path(forecast_root), pairs)
+        _validate_forecast_locations(Path(forecast_root), all_pairs)
 
         if forecast_hours > forecasts.shape[2]:
             raise ValueError(
@@ -92,6 +101,8 @@ class DualEncoderDataset(Dataset):
 
         self.location_ids = tuple(location_ids)
         self.sensor_ids = tuple(sensor_ids)
+        paired_sensors = {sensor for _, sensor, _, _ in all_pairs}
+        self.excluded_sensor_ids = tuple(sorted(excluded & paired_sensors))
         self.timestamps = torch.from_numpy(timestamps)
         self.observations = torch.from_numpy(observations)
         self.forecasts = torch.from_numpy(forecasts)
@@ -374,6 +385,26 @@ def _read_pairs(path: Path) -> list[tuple[str, int, float, float]]:
     if not pairs:
         raise ValueError(f"pair CSV contains no rows: {path}")
     return pairs
+
+
+def _read_excluded_sensors(path: Path) -> set[int]:
+    if not path.is_file():
+        raise FileNotFoundError(f"excluded sensor CSV not found: {path}")
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        _require_csv_columns(reader.fieldnames, ("sensor_id",), path)
+        sensors = set()
+        for number, row in enumerate(reader, 2):
+            try:
+                sensor = int(row["sensor_id"])
+                if sensor < 1 or sensor in sensors:
+                    raise ValueError
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid or duplicate excluded sensor row {number} in {path}"
+                ) from error
+            sensors.add(sensor)
+    return sensors
 
 
 def _history_files(paths: list[Path]) -> list[Path]:

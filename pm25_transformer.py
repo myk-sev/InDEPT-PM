@@ -650,6 +650,12 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def format_duration(seconds: float) -> str:
+    hours, seconds = divmod(max(0, round(seconds)), 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def build_loaders(
     pairs: Path,
     indoor_history: list[Path],
@@ -659,6 +665,7 @@ def build_loaders(
     training_config: dict,
     device: torch.device,
     balanced_training_index: Path | None = None,
+    excluded_sensors: Path | None = None,
 ) -> tuple[DualEncoderDataset, DualEncoderLoaders]:
     dataset = DualEncoderDataset(
         pairs,
@@ -673,6 +680,7 @@ def build_loaders(
         maximum_outdoor_age_hours=training_config.get(
             "maximum_outdoor_age_hours", 48
         ),
+        excluded_sensors_path=excluded_sensors,
     )
     loaders = create_data_loaders(
         dataset,
@@ -732,7 +740,12 @@ def train(args: argparse.Namespace) -> None:
         training_config["balanced_training_index_sha256"] = file_sha256(
             args.balanced_training_index
         )
-    _, loaders = build_loaders(
+    if args.excluded_sensors is not None:
+        training_config["excluded_sensors"] = str(args.excluded_sensors.resolve())
+        training_config["excluded_sensors_sha256"] = file_sha256(
+            args.excluded_sensors
+        )
+    dataset, loaders = build_loaders(
         args.pairs,
         args.indoor_history,
         args.outdoor_history,
@@ -741,6 +754,7 @@ def train(args: argparse.Namespace) -> None:
         training_config,
         device,
         args.balanced_training_index,
+        args.excluded_sensors,
     )
     if loaders.balance_report is not None:
         training_config["balance_report"] = loaders.balance_report
@@ -765,7 +779,10 @@ def train(args: argparse.Namespace) -> None:
         name: len(getattr(loaders, name).dataset)
         for name in ("train", "validation", "temporal_test", "location_test")
     }
-    print(f"device={device} samples={counts}")
+    print(
+        f"device={device} excluded_sensors={len(dataset.excluded_sensor_ids)} "
+        f"samples={counts}"
+    )
     print(
         f"indoor z-score mean={zscores.indoor_mean:.6g} "
         f"std={zscores.indoor_std:.6g}; "
@@ -796,8 +813,11 @@ def train(args: argparse.Namespace) -> None:
         training_losses.append(training["loss"])
         validation_losses.append(validation["loss"])
         elapsed = time.perf_counter() - started
+        estimated_remaining = elapsed / epoch * (args.epochs - epoch)
         print(
-            f"epoch={epoch}/{args.epochs} elapsed={elapsed:.1f}s "
+            f"epoch={epoch}/{args.epochs} "
+            f"time_taken={format_duration(elapsed)} "
+            f"ETA={format_duration(estimated_remaining)} "
             f"train_loss={training['loss']:.6g} "
             f"val_loss={validation['loss']:.6g} "
             f"train_mae={training['mae']:.6g} "
@@ -831,7 +851,8 @@ def train(args: argparse.Namespace) -> None:
     plot_training_losses(loss_plot, training_losses, validation_losses)
     print(
         f"best_{args.loss}={best_loss:.6g} checkpoint={args.checkpoint} "
-        f"loss_plot={loss_plot}"
+        f"loss_plot={loss_plot} "
+        f"time_taken={format_duration(time.perf_counter() - started)}"
     )
 
 
@@ -851,6 +872,14 @@ def infer(args: argparse.Namespace) -> None:
         actual = file_sha256(balanced_training_index)
         if expected is not None and actual != expected:
             raise ValueError("balanced training index does not match the checkpoint")
+    excluded_sensors = args.excluded_sensors
+    if excluded_sensors is None and training_config.get("excluded_sensors"):
+        excluded_sensors = Path(training_config["excluded_sensors"])
+    if excluded_sensors is not None:
+        expected = training_config.get("excluded_sensors_sha256")
+        actual = file_sha256(excluded_sensors)
+        if expected is not None and actual != expected:
+            raise ValueError("excluded sensor list does not match the checkpoint")
     dataset, loaders = build_loaders(
         args.pairs,
         args.indoor_history,
@@ -860,6 +889,7 @@ def infer(args: argparse.Namespace) -> None:
         training_config,
         device,
         balanced_training_index,
+        excluded_sensors,
     )
     loader = {
         "train": loaders.train,
@@ -974,6 +1004,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="balancer intersection CSV used to select only training anchors",
     )
+    train_parser.add_argument(
+        "--excluded-sensors",
+        type=Path,
+        help="CSV with a sensor_id column; removes sensors from every split",
+    )
     train_parser.add_argument("--checkpoint", type=Path, required=True)
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
@@ -1013,6 +1048,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--balanced-training-index",
         type=Path,
         help="override the balancer intersection CSV recorded in the checkpoint",
+    )
+    infer_parser.add_argument(
+        "--excluded-sensors",
+        type=Path,
+        help="override the excluded sensor CSV recorded in the checkpoint",
     )
     infer_parser.add_argument("--checkpoint", type=Path, required=True)
     infer_parser.add_argument(
