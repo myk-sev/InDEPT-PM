@@ -5,6 +5,7 @@ import math
 from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +21,10 @@ PAIR_COLUMNS = (
     "outdoor_latitude",
     "outdoor_longitude",
 )
+BALANCER_PAIR_COLUMNS = ("sensor_id", "latitude", "longitude")
 INDOOR_COLUMNS = ("time_stamp", "sensor_index", "pm2.5_atm")
 OUTDOOR_COLUMNS = ("sensor_id", "timestamp_utc", "tempo_pm25_ug_m3")
+BALANCE_COLUMNS = ("sensor_id", "timestamp_utc", "balance_cell")
 FORECAST_COLUMNS = (
     "location_id",
     "cycle_time_utc",
@@ -37,6 +40,7 @@ class DualEncoderLoaders:
     validation: DataLoader
     temporal_test: DataLoader
     location_test: DataLoader
+    balance_report: dict[str, object] | None = None
 
 
 class DualEncoderDataset(Dataset):
@@ -87,6 +91,7 @@ class DualEncoderDataset(Dataset):
             )
 
         self.location_ids = tuple(location_ids)
+        self.sensor_ids = tuple(sensor_ids)
         self.timestamps = torch.from_numpy(timestamps)
         self.observations = torch.from_numpy(observations)
         self.forecasts = torch.from_numpy(forecasts)
@@ -153,8 +158,9 @@ def create_data_loaders(
     seed: int = 42,
     num_workers: int = 0,
     pin_memory: bool = False,
+    balanced_training_index: str | Path | None = None,
 ) -> DualEncoderLoaders:
-    """Split by location and time without overlapping future labels."""
+    """Split without label overlap and optionally balance only training."""
     if batch_size < 1 or num_workers < 0:
         raise ValueError("batch_size must be positive and num_workers cannot be negative")
     if not 0 < train_fraction < 1 or not 0 < validation_fraction < 1:
@@ -208,6 +214,13 @@ def create_data_loaders(
             f"fractions (train, validation, temporal test, location test: {counts})"
         )
 
+    balance_report = None
+    if balanced_training_index is not None:
+        train_indices, balance_report = _balanced_training_indices(
+            dataset, split_indices[0], Path(balanced_training_index)
+        )
+        split_indices = (train_indices, *split_indices[1:])
+
     common = {
         "batch_size": batch_size,
         "num_workers": num_workers,
@@ -225,7 +238,98 @@ def create_data_loaders(
         validation=DataLoader(Subset(dataset, split_indices[1]), **common),
         temporal_test=DataLoader(Subset(dataset, split_indices[2]), **common),
         location_test=DataLoader(Subset(dataset, split_indices[3]), **common),
+        balance_report=balance_report,
     )
+
+
+def _balanced_training_indices(
+    dataset: DualEncoderDataset, train_indices: np.ndarray, path: Path
+) -> tuple[np.ndarray, dict[str, object]]:
+    records = _read_balance_index(path)
+    first_timestamp = int(dataset.timestamps[0])
+    locations = {sensor: index for index, sensor in enumerate(dataset.sensor_ids)}
+    records_by_code = {}
+    for (sensor, timestamp), record in records.items():
+        location = locations.get(sensor)
+        anchor, remainder = divmod(timestamp - first_timestamp, 3600)
+        if location is not None and not remainder and 0 <= anchor < dataset._steps:
+            records_by_code[location * dataset._steps + anchor] = record
+
+    record_codes = np.fromiter(records_by_code, dtype=np.int64)
+    valid_count = int(np.isin(record_codes, dataset._sample_codes).sum())
+    groups = {cell: [] for cell in sorted({cell for cell, _ in records.values()})}
+    for index in train_indices:
+        code = int(dataset._sample_codes[index])
+        record = records_by_code.get(code)
+        if record is not None:
+            cell, rank = record
+            groups[cell].append((rank, code, int(index)))
+
+    missing = [cell for cell, rows in groups.items() if not rows]
+    if missing:
+        raise ValueError(
+            "balanced training cells have no eligible training windows: "
+            + ", ".join(missing)
+        )
+
+    quota = min(map(len, groups.values()))
+    selected = [
+        index
+        for rows in groups.values()
+        for _, _, index in sorted(rows)[:quota]
+    ]
+    return np.array(sorted(selected), dtype=np.int64), {
+        "requested_anchors": len(records),
+        "valid_anchors": valid_count,
+        "training_eligible_anchors": sum(map(len, groups.values())),
+        "selected_training_anchors": len(selected),
+        "quota_per_cell": quota,
+        "eligible_cell_counts": {
+            cell: len(rows) for cell, rows in groups.items()
+        },
+    }
+
+
+def _read_balance_index(path: Path) -> dict[tuple[int, int], tuple[str, int]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"balanced training index not found: {path}")
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        _require_csv_columns(reader.fieldnames, BALANCE_COLUMNS, path)
+        records = {}
+        for number, row in enumerate(reader, 2):
+            selected = (row.get("selected") or "true").strip().lower()
+            if selected in {"false", "0", "no"}:
+                continue
+            if selected not in {"true", "1", "yes"}:
+                raise ValueError(f"invalid selected value on row {number} in {path}")
+            try:
+                sensor = int(row["sensor_id"])
+                value = datetime.fromisoformat(
+                    row["timestamp_utc"].replace("Z", "+00:00")
+                )
+                if (
+                    value.tzinfo is None
+                    or value.utcoffset() is None
+                    or value.utcoffset().total_seconds() != 0
+                ):
+                    raise ValueError
+                timestamp = int(value.timestamp())
+                cell = row["balance_cell"].strip()
+                rank = int(row.get("selection_rank") or 0)
+                if timestamp % 3600 or not cell or rank < 0:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid balanced training row {number} in {path}"
+                ) from error
+            key = (sensor, timestamp)
+            if key in records:
+                raise ValueError(f"duplicate balanced training anchor in {path}")
+            records[key] = (cell, rank)
+    if not records:
+        raise ValueError(f"balanced training index contains no selected rows: {path}")
+    return records
 
 
 def _paths(value: str | Path | Iterable[str | Path]) -> list[Path]:
@@ -241,14 +345,20 @@ def _read_pairs(path: Path) -> list[tuple[str, int, float, float]]:
         raise FileNotFoundError(f"pair CSV not found: {path}")
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        _require_csv_columns(reader.fieldnames, PAIR_COLUMNS, path)
+        fields = set(reader.fieldnames or ())
+        if set(PAIR_COLUMNS) <= fields:
+            sensor_column, latitude_column, longitude_column = PAIR_COLUMNS
+        elif set(BALANCER_PAIR_COLUMNS) <= fields:
+            sensor_column, latitude_column, longitude_column = BALANCER_PAIR_COLUMNS
+        else:
+            _require_csv_columns(reader.fieldnames, PAIR_COLUMNS, path)
         pairs = []
         seen = set()
         for number, row in enumerate(reader, 1):
             try:
-                sensor = int(row["indoor_sensor_index"])
-                latitude = float(row["outdoor_latitude"])
-                longitude = float(row["outdoor_longitude"])
+                sensor = int(row[sensor_column])
+                latitude = float(row[latitude_column])
+                longitude = float(row[longitude_column])
                 if sensor in seen or not (-90 <= latitude <= 90) or not (
                     -180 <= longitude <= 180
                 ):
@@ -318,45 +428,51 @@ def _read_indoor_history(
 def _read_outdoor_history(
     path: Path, sensor_ids: list[int]
 ) -> dict[int, dict[int, float]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"TEMPO history CSV not found: {path}")
+    files = (
+        [path]
+        if path.is_file()
+        else sorted(path.rglob("tempo_pm25_*.csv")) if path.is_dir() else []
+    )
+    if not files:
+        raise FileNotFoundError(f"TEMPO history CSV or directory not found: {path}")
     requested = np.array(sorted(sensor_ids), dtype=np.int64)
     values = {sensor: {} for sensor in sensor_ids}
-    try:
-        batches = pacsv.open_csv(
-            path,
-            read_options=pacsv.ReadOptions(block_size=16 * 1024 * 1024),
-            convert_options=pacsv.ConvertOptions(
-                include_columns=list(OUTDOOR_COLUMNS),
-                column_types={
-                    "sensor_id": pa.int64(),
-                    "timestamp_utc": pa.timestamp("s", tz="UTC"),
-                    "tempo_pm25_ug_m3": pa.float32(),
-                },
-            ),
-        )
-        for batch in batches:
-            sensors = batch["sensor_id"].to_numpy(zero_copy_only=False)
-            selected = np.isin(sensors, requested)
-            if not np.any(selected):
-                continue
-            timestamps = (
-                batch["timestamp_utc"]
-                .cast(pa.int64())
-                .to_numpy(zero_copy_only=False)[selected]
+    for file in files:
+        try:
+            batches = pacsv.open_csv(
+                file,
+                read_options=pacsv.ReadOptions(block_size=16 * 1024 * 1024),
+                convert_options=pacsv.ConvertOptions(
+                    include_columns=list(OUTDOOR_COLUMNS),
+                    column_types={
+                        "sensor_id": pa.int64(),
+                        "timestamp_utc": pa.timestamp("s", tz="UTC"),
+                        "tempo_pm25_ug_m3": pa.float32(),
+                    },
+                ),
             )
-            concentrations = batch["tempo_pm25_ug_m3"].to_numpy(
-                zero_copy_only=False
-            )[selected]
-            for sensor, timestamp, concentration in zip(
-                sensors[selected], timestamps, concentrations
-            ):
-                value = float(concentration)
-                if timestamp % 3600 or value < 0 or not math.isfinite(value):
-                    raise ValueError("invalid TEMPO value or timestamp")
-                _store(values[int(sensor)], int(timestamp), value, path)
-    except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
-        raise ValueError(f"invalid TEMPO history CSV {path}: {error}") from error
+            for batch in batches:
+                sensors = batch["sensor_id"].to_numpy(zero_copy_only=False)
+                selected = np.isin(sensors, requested)
+                if not np.any(selected):
+                    continue
+                timestamps = (
+                    batch["timestamp_utc"]
+                    .cast(pa.int64())
+                    .to_numpy(zero_copy_only=False)[selected]
+                )
+                concentrations = batch["tempo_pm25_ug_m3"].to_numpy(
+                    zero_copy_only=False
+                )[selected]
+                for sensor, timestamp, concentration in zip(
+                    sensors[selected], timestamps, concentrations
+                ):
+                    value = float(concentration)
+                    if timestamp % 3600 or value < 0 or not math.isfinite(value):
+                        raise ValueError("invalid TEMPO value or timestamp")
+                    _store(values[int(sensor)], int(timestamp), value, file)
+        except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
+            raise ValueError(f"invalid TEMPO history CSV {file}: {error}") from error
     return values
 
 

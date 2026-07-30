@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import random
 import time
@@ -598,6 +599,28 @@ def plot_prediction(
     plt.close(figure)
 
 
+def plot_training_losses(
+    output: Path, training_losses: list[float], validation_losses: list[float]
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from matplotlib import pyplot as plt
+
+    epochs = range(1, len(training_losses) + 1)
+    figure, axis = plt.subplots(figsize=(8, 5))
+    axis.plot(epochs, training_losses, marker="o", label="Training loss")
+    axis.plot(epochs, validation_losses, marker="s", label="Validation loss")
+    axis.set(xlabel="Epoch", ylabel="Loss", title="Training and validation loss")
+    axis.set_xticks(list(epochs))
+    axis.grid(alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+
+
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
         if torch.cuda.is_available():
@@ -612,6 +635,11 @@ def resolve_device(name: str) -> torch.device:
     if device.type == "xpu" and not torch.xpu.is_available():
         raise ValueError("XPU was requested but is not available")
     return device
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def set_seed(seed: int) -> None:
@@ -630,6 +658,7 @@ def build_loaders(
     config: ModelConfig,
     training_config: dict,
     device: torch.device,
+    balanced_training_index: Path | None = None,
 ) -> tuple[DualEncoderDataset, DualEncoderLoaders]:
     dataset = DualEncoderDataset(
         pairs,
@@ -654,6 +683,7 @@ def build_loaders(
         seed=training_config["seed"],
         num_workers=training_config["num_workers"],
         pin_memory=device.type in {"cuda", "xpu"},
+        balanced_training_index=balanced_training_index,
     )
     return dataset, loaders
 
@@ -695,6 +725,13 @@ def train(args: argparse.Namespace) -> None:
         "minimum_outdoor_history_hours": args.minimum_outdoor_history_hours,
         "maximum_outdoor_age_hours": args.maximum_outdoor_age_hours,
     }
+    if args.balanced_training_index is not None:
+        training_config["balanced_training_index"] = str(
+            args.balanced_training_index.resolve()
+        )
+        training_config["balanced_training_index_sha256"] = file_sha256(
+            args.balanced_training_index
+        )
     _, loaders = build_loaders(
         args.pairs,
         args.indoor_history,
@@ -703,7 +740,19 @@ def train(args: argparse.Namespace) -> None:
         config,
         training_config,
         device,
+        args.balanced_training_index,
     )
+    if loaders.balance_report is not None:
+        training_config["balance_report"] = loaders.balance_report
+        report = loaders.balance_report
+        print(
+            "balanced training "
+            f"requested={report['requested_anchors']} "
+            f"valid={report['valid_anchors']} "
+            f"eligible={report['training_eligible_anchors']} "
+            f"selected={report['selected_training_anchors']} "
+            f"quota_per_cell={report['quota_per_cell']}"
+        )
     zscores = fit_zscores(loaders.train)
     model = DualEncoderPatchTransformer(config).to(device)
     loss_function = make_loss(args.loss, args.huber_delta)
@@ -728,6 +777,8 @@ def train(args: argparse.Namespace) -> None:
 
     best_loss = math.inf
     stale_epochs = 0
+    training_losses = []
+    validation_losses = []
     started = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
         training = run_epoch(
@@ -742,6 +793,8 @@ def train(args: argparse.Namespace) -> None:
         validation = run_epoch(
             model, loaders.validation, loss_function, zscores, device
         )
+        training_losses.append(training["loss"])
+        validation_losses.append(validation["loss"])
         elapsed = time.perf_counter() - started
         print(
             f"epoch={epoch}/{args.epochs} elapsed={elapsed:.1f}s "
@@ -774,7 +827,12 @@ def train(args: argparse.Namespace) -> None:
             ):
                 print(f"early stopping after {epoch} epochs")
                 break
-    print(f"best_{args.loss}={best_loss:.6g} checkpoint={args.checkpoint}")
+    loss_plot = args.checkpoint.with_suffix(".loss.png")
+    plot_training_losses(loss_plot, training_losses, validation_losses)
+    print(
+        f"best_{args.loss}={best_loss:.6g} checkpoint={args.checkpoint} "
+        f"loss_plot={loss_plot}"
+    )
 
 
 def infer(args: argparse.Namespace) -> None:
@@ -783,6 +841,16 @@ def infer(args: argparse.Namespace) -> None:
     training_config = dict(checkpoint["training_config"])
     training_config["batch_size"] = 1
     training_config["num_workers"] = 0
+    balanced_training_index = args.balanced_training_index
+    if balanced_training_index is None and training_config.get(
+        "balanced_training_index"
+    ):
+        balanced_training_index = Path(training_config["balanced_training_index"])
+    if balanced_training_index is not None:
+        expected = training_config.get("balanced_training_index_sha256")
+        actual = file_sha256(balanced_training_index)
+        if expected is not None and actual != expected:
+            raise ValueError("balanced training index does not match the checkpoint")
     dataset, loaders = build_loaders(
         args.pairs,
         args.indoor_history,
@@ -791,6 +859,7 @@ def infer(args: argparse.Namespace) -> None:
         config,
         training_config,
         device,
+        balanced_training_index,
     )
     loader = {
         "train": loaders.train,
@@ -900,6 +969,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument("--outdoor-history", type=Path, required=True)
     train_parser.add_argument("--forecast-root", type=Path, required=True)
+    train_parser.add_argument(
+        "--balanced-training-index",
+        type=Path,
+        help="balancer intersection CSV used to select only training anchors",
+    )
     train_parser.add_argument("--checkpoint", type=Path, required=True)
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
@@ -935,6 +1009,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer_parser.add_argument("--outdoor-history", type=Path, required=True)
     infer_parser.add_argument("--forecast-root", type=Path, required=True)
+    infer_parser.add_argument(
+        "--balanced-training-index",
+        type=Path,
+        help="override the balancer intersection CSV recorded in the checkpoint",
+    )
     infer_parser.add_argument("--checkpoint", type=Path, required=True)
     infer_parser.add_argument(
         "--split",
