@@ -11,7 +11,7 @@ import torch
 from pm25_transformer import build_loaders, file_sha256, load_checkpoint
 
 
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 SPLITS = ("train", "validation", "temporal-test", "location-test")
 
@@ -138,9 +138,12 @@ def main() -> None:
     cache = {
         "format_version": CACHE_FORMAT_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "checkpoint": str(args.checkpoint.resolve()),
-        "checkpoint_sha256": file_sha256(args.checkpoint),
-        "model_config": checkpoint["model_config"],
+        "source_checkpoint": str(args.checkpoint.resolve()),
+        "data_contract": {
+            f"{name}_shape": tuple(records[0]["sample"][name].shape)
+            for name in ("history", "forecast", "target")
+        }
+        | {"cyclical_time": getattr(config, "cyclical_time", False)},
         "training_config": source_config,
         "split": args.split,
         "samples": records,

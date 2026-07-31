@@ -8,7 +8,6 @@ from pathlib import Path
 import torch
 
 from pm25_transformer import (
-    file_sha256,
     load_checkpoint,
     normalize_batch,
     plot_prediction,
@@ -16,7 +15,8 @@ from pm25_transformer import (
 )
 
 
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
+SUPPORTED_CACHE_FORMAT_VERSIONS = {1, CACHE_FORMAT_VERSION}
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
@@ -38,14 +38,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_data_contract(cache: dict, records: list[dict], config: object) -> None:
+    cyclical = getattr(config, "cyclical_time", False)
+    expected = {
+        "history_shape": (config.history_hours, 8 if cyclical else 6),
+        "forecast_shape": (config.prediction_hours, 7 if cyclical else 1),
+        "target_shape": (config.prediction_hours,),
+        "cyclical_time": cyclical,
+    }
+    contract = cache.get("data_contract")
+    if contract is not None and contract != expected:
+        raise ValueError("cache data contract is incompatible with the checkpoint")
+
+    for record in records:
+        sample = record.get("sample")
+        if not isinstance(sample, dict):
+            raise ValueError("inference cache contains an invalid sample")
+        for name in ("history", "forecast", "target"):
+            value = sample.get(name)
+            if not isinstance(value, torch.Tensor) or tuple(value.shape) != expected[
+                f"{name}_shape"
+            ]:
+                raise ValueError(
+                    f"cached sample {record.get('sample_index')} has an "
+                    f"incompatible {name} shape"
+                )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     started = time.perf_counter()
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
-    if cache.get("format_version") != CACHE_FORMAT_VERSION:
+    if cache.get("format_version") not in SUPPORTED_CACHE_FORMAT_VERSIONS:
         raise ValueError("unsupported inference cache format")
-    if cache.get("checkpoint_sha256") != file_sha256(args.checkpoint):
-        raise ValueError("cache was built for a different checkpoint")
 
     records = cache.get("samples")
     if not isinstance(records, list) or not records:
@@ -69,9 +94,8 @@ def main() -> None:
     selected = [by_index[index] for index in requested]
 
     device = resolve_device(args.device)
-    model, config, zscores, checkpoint = load_checkpoint(args.checkpoint, device)
-    if cache.get("model_config") != checkpoint["model_config"]:
-        raise ValueError("cache model configuration does not match the checkpoint")
+    model, config, zscores, _ = load_checkpoint(args.checkpoint, device)
+    validate_data_contract(cache, records, config)
 
     samples = [record["sample"] for record in selected]
     batch = {

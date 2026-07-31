@@ -54,9 +54,11 @@ inference_samples.cache.pt
 The scripts do not require those additional suffixes. Existing checkpoint names
 such as `pm25_transformer_smoke_test.pt` continue to work.
 
-The cache does not contain model predictions. Predictions are recalculated each
-time `run_cached_inference.py` runs. The cache records the checkpoint's SHA-256
-hash, and inference stops if a different checkpoint is supplied.
+The cache does not contain model predictions or checkpoint-specific
+normalization. Predictions are recalculated using the supplied checkpoint each
+time `run_cached_inference.py` runs. A cache can therefore be reused across
+models whose history length, prediction length, and time-feature layout are
+compatible. The inference script validates that data contract before running.
 
 ## 1. Build a named cache
 
@@ -174,8 +176,12 @@ Rebuild it when:
 
 - different sample indices or names are needed;
 - a different data split is needed;
-- the checkpoint is retrained or replaced; or
+- a model needs different history, prediction, or time-feature inputs; or
 - updated source data should be reflected in the samples.
+
+Retraining a model or switching to another compatible model does not require a
+cache rebuild. Version 1 caches remain supported and receive the same tensor
+shape validation.
 
 The first cache build still scans the complete source dataset and can take
 several minutes. Subsequent graph generation loads only the compact cache and
