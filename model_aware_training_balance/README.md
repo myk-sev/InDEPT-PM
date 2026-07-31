@@ -37,8 +37,9 @@ Use this repository's virtual environment:
 ```
 
 The model defaults are 168 history hours, 36 prediction/target hours, at least
-24 TEMPO observations in the history, and a maximum TEMPO age of 48 hours.
-Pass the corresponding options whenever training uses different values.
+24 TEMPO observations in the history, and TEMPO measurements in each of the
+three latest hourly history slots ending at the anchor. The three-hour
+requirement is fixed and is not configurable.
 
 Use the generated index during training:
 

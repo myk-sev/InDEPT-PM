@@ -16,7 +16,11 @@ import numpy as np
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from data_loader import DualEncoderDataset, create_data_loaders
+from data_loader import (
+    REQUIRED_RECENT_OUTDOOR_HOURS,
+    DualEncoderDataset,
+    create_data_loaders,
+)
 
 
 HOUR = 3600
@@ -312,7 +316,7 @@ def write_report(
         f"- History hours: {args.history_hours}",
         f"- Prediction/target hours: {args.prediction_hours}",
         f"- Minimum TEMPO history observations: {args.minimum_outdoor_history_hours}",
-        f"- Maximum TEMPO observation age: {args.maximum_outdoor_age_hours} hours",
+        f"- Required consecutive recent TEMPO hours: {REQUIRED_RECENT_OUTDOOR_HOURS}",
         f"- Train fraction: {args.train_fraction}",
         f"- Validation fraction: {args.validation_fraction}",
         f"- Location holdout fraction: {args.location_holdout_fraction}",
@@ -351,7 +355,6 @@ def build(args: argparse.Namespace) -> dict[str, object]:
         history_hours=args.history_hours,
         forecast_hours=args.prediction_hours,
         minimum_outdoor_history_hours=args.minimum_outdoor_history_hours,
-        maximum_outdoor_age_hours=args.maximum_outdoor_age_hours,
         excluded_sensors_path=args.excluded_sensors,
     )
     loaders = create_data_loaders(
@@ -445,7 +448,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--prediction-hours", type=int, default=36)
     parser.add_argument("--minimum-outdoor-history-hours", type=int, default=24)
-    parser.add_argument("--maximum-outdoor-age-hours", type=int, default=48)
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
     parser.add_argument("--location-holdout-fraction", type=float, default=0.20)
