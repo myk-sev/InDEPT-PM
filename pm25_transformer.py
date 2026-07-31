@@ -6,7 +6,7 @@ import math
 import random
 import time
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from pm25_models import (
     ModelConfig,
     PatchEmbedding,
     _missing_aware_history,
+    build_config,
     build_model,
     model_names,
 )
@@ -197,9 +198,10 @@ def load_checkpoint(
         raise ValueError(
             "checkpoint predates the missing-aware history architecture; retrain it"
         )
-    config = ModelConfig(**checkpoint["model_config"])
+    model_name = checkpoint.get("model_name", DEFAULT_MODEL)
+    config = build_config(model_name, checkpoint["model_config"])
     zscores = ZScores(**checkpoint["normalization"])
-    model = build_model(checkpoint.get("model_name", DEFAULT_MODEL), config).to(device)
+    model = build_model(model_name, config).to(device)
     model.load_state_dict(checkpoint["model_state"])
     return model, config, zscores, checkpoint
 
@@ -492,9 +494,7 @@ def build_loaders(
 
 
 def train(args: argparse.Namespace) -> None:
-    config = ModelConfig(
-        **{field.name: getattr(args, field.name) for field in fields(ModelConfig)}
-    )
+    config = build_config(args.model, vars(args))
     if args.epochs < 1 or args.batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
     if args.learning_rate <= 0 or args.weight_decay < 0:
@@ -726,7 +726,7 @@ def infer(args: argparse.Namespace) -> None:
 def _add_stream_arguments(
     parser: argparse.ArgumentParser, stream: str, patches: bool
 ) -> None:
-    defaults = ModelConfig()
+    defaults = build_config(DEFAULT_MODEL, {})
     prefix = stream.replace("_", "-")
     if patches:
         parser.add_argument(

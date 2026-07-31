@@ -1,12 +1,77 @@
 """Dual-encoder PM2.5 transformer with one token per hourly timestep."""
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-if TYPE_CHECKING:
-    from pm25_models import ModelConfig
+
+@dataclass(frozen=True)
+class TimestepTransformerConfig:
+    history_hours: int = 168
+    prediction_hours: int = 36
+    history_embedding_dim: int = 128
+    history_heads: int = 4
+    history_head_dim: int = 32
+    history_layers: int = 2
+    history_feedforward_dim: int = 256
+    history_dropout: float = 0.1
+    history_activation: str = "gelu"
+    history_norm_first: bool = True
+    history_layer_norm_eps: float = 1e-5
+    forecast_embedding_dim: int = 64
+    forecast_heads: int = 4
+    forecast_head_dim: int = 16
+    forecast_layers: int = 2
+    forecast_feedforward_dim: int = 128
+    forecast_dropout: float = 0.1
+    forecast_activation: str = "gelu"
+    forecast_norm_first: bool = True
+    forecast_layer_norm_eps: float = 1e-5
+    decoder_embedding_dim: int = 128
+    decoder_heads: int = 4
+    decoder_head_dim: int = 32
+    decoder_layers: int = 2
+    decoder_feedforward_dim: int = 256
+    decoder_dropout: float = 0.1
+    decoder_activation: str = "gelu"
+    decoder_norm_first: bool = True
+    decoder_layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        positive = (
+            "history_hours",
+            "prediction_hours",
+            "history_layers",
+            "history_feedforward_dim",
+            "forecast_layers",
+            "forecast_feedforward_dim",
+            "decoder_layers",
+            "decoder_feedforward_dim",
+        )
+        for name in positive:
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be positive")
+        for stream in ("history", "forecast", "decoder"):
+            embedding = getattr(self, f"{stream}_embedding_dim")
+            heads = getattr(self, f"{stream}_heads")
+            head_dim = getattr(self, f"{stream}_head_dim")
+            if embedding < 1 or heads < 1 or head_dim < 1:
+                raise ValueError(
+                    f"{stream} embedding, heads, and head dimension must be positive"
+                )
+            if embedding != heads * head_dim:
+                raise ValueError(
+                    f"{stream}_embedding_dim ({embedding}) must equal "
+                    f"{stream}_heads ({heads}) x {stream}_head_dim ({head_dim})"
+                )
+            dropout = getattr(self, f"{stream}_dropout")
+            if not 0 <= dropout < 1:
+                raise ValueError(f"{stream}_dropout must be in [0, 1)")
+            if getattr(self, f"{stream}_activation") not in {"relu", "gelu"}:
+                raise ValueError(f"{stream}_activation must be relu or gelu")
+            if getattr(self, f"{stream}_layer_norm_eps") <= 0:
+                raise ValueError(f"{stream}_layer_norm_eps must be positive")
 
 
 class TimestepEmbedding(nn.Module):
@@ -35,7 +100,7 @@ class TimestepEmbedding(nn.Module):
 class DualEncoderTransformer(nn.Module):
     """Predict future indoor PM2.5 without grouping inputs into patches."""
 
-    def __init__(self, config: "ModelConfig") -> None:
+    def __init__(self, config: TimestepTransformerConfig) -> None:
         super().__init__()
         self.config = config
         self.history_embedding = TimestepEmbedding(
@@ -116,7 +181,9 @@ def _missing_aware_history(history: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _encoder(config: "ModelConfig", stream: str) -> nn.TransformerEncoder:
+def _encoder(
+    config: TimestepTransformerConfig, stream: str
+) -> nn.TransformerEncoder:
     embedding = getattr(config, f"{stream}_embedding_dim")
     epsilon = getattr(config, f"{stream}_layer_norm_eps")
     layer = nn.TransformerEncoderLayer(
