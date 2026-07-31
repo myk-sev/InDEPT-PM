@@ -490,9 +490,6 @@ def build_loaders(
         minimum_outdoor_history_hours=training_config.get(
             "minimum_outdoor_history_hours", 24
         ),
-        maximum_outdoor_age_hours=training_config.get(
-            "maximum_outdoor_age_hours", 48
-        ),
         excluded_sensors_path=excluded_sensors,
         cyclical_time=getattr(config, "cyclical_time", False),
     )
@@ -548,7 +545,6 @@ def train(args: argparse.Namespace) -> None:
         "epochs": args.epochs,
         "device": args.device,
         "minimum_outdoor_history_hours": args.minimum_outdoor_history_hours,
-        "maximum_outdoor_age_hours": args.maximum_outdoor_age_hours,
     }
     if args.balanced_training_index is not None:
         training_config["balanced_training_index"] = str(
@@ -957,7 +953,6 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
     train_parser.add_argument("--minimum-outdoor-history-hours", type=int, default=24)
-    train_parser.add_argument("--maximum-outdoor-age-hours", type=int, default=48)
     _add_stream_arguments(train_parser, "history", True)
     _add_stream_arguments(train_parser, "forecast", True)
     _add_stream_arguments(train_parser, "decoder", False)

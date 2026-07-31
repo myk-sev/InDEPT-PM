@@ -32,6 +32,7 @@ FORECAST_COLUMNS = (
     "valid_time_utc",
     "pm25_corrected_ug_m3",
 )
+REQUIRED_RECENT_OUTDOOR_HOURS = 3
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,6 @@ class DualEncoderDataset(Dataset):
         history_hours: int = 168,
         forecast_hours: int = 36,
         minimum_outdoor_history_hours: int = 24,
-        maximum_outdoor_age_hours: int = 48,
         excluded_sensors_path: str | Path | None = None,
         cyclical_time: bool = False,
     ) -> None:
@@ -71,13 +71,14 @@ class DualEncoderDataset(Dataset):
             raise ValueError(
                 "minimum_outdoor_history_hours must be between 1 and history_hours"
             )
-        if maximum_outdoor_age_hours < 0:
-            raise ValueError("maximum_outdoor_age_hours cannot be negative")
+        if history_hours < REQUIRED_RECENT_OUTDOOR_HOURS:
+            raise ValueError(
+                f"history_hours must be at least {REQUIRED_RECENT_OUTDOOR_HOURS}"
+            )
 
         self.history_hours = history_hours
         self.forecast_hours = forecast_hours
         self.minimum_outdoor_history_hours = minimum_outdoor_history_hours
-        self.maximum_outdoor_age_hours = maximum_outdoor_age_hours
         all_pairs = _read_pairs(Path(pairs_path))
         excluded = (
             _read_excluded_sensors(Path(excluded_sensors_path))
@@ -128,7 +129,6 @@ class DualEncoderDataset(Dataset):
             history_hours,
             forecast_hours,
             minimum_outdoor_history_hours,
-            maximum_outdoor_age_hours,
         )
         if not len(self._sample_codes):
             raise ValueError(
@@ -720,7 +720,6 @@ def _valid_sample_codes(
     history_hours: int,
     forecast_hours: int,
     minimum_outdoor_history_hours: int,
-    maximum_outdoor_age_hours: int,
 ) -> np.ndarray:
     locations, steps, _ = observations.shape
     outdoor_valid = np.isfinite(observations[:, :, 0])
@@ -754,10 +753,10 @@ def _valid_sample_codes(
             - outdoor_count[:, anchor - history_hours + 1]
             >= minimum_outdoor_history_hours
         )
-        recent_start = max(0, anchor - maximum_outdoor_age_hours)
+        recent_start = anchor - REQUIRED_RECENT_OUTDOOR_HOURS + 1
         outdoor_recent_ok = (
             outdoor_count[:, anchor + 1] - outdoor_count[:, recent_start]
-            > 0
+            == REQUIRED_RECENT_OUTDOOR_HOURS
         )
         target_ok = (
             target_missing[:, anchor + forecast_hours + 1]
