@@ -106,6 +106,15 @@ features to both the historical observations and future NAQFC inputs:
 Select either with `pm25_transformer.py train --model MODEL_NAME`. The original
 `transformer` and `transformer-no-patches` inputs and checkpoints are unchanged.
 
+## Delta model variants
+
+These models learn changes from the last indoor PM2.5 observation while still
+returning absolute PM2.5 predictions:
+
+- `transformer-cyclical-delta`
+- `transformer-no-patches-cyclical-delta`
+- `patchtst-delta`
+
 ## Resume interrupted training
 
 Training writes a recovery checkpoint after every completed epoch alongside the

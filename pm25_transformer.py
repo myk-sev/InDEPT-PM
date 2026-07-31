@@ -520,6 +520,8 @@ def train(args: argparse.Namespace) -> None:
         raise ValueError(
             "gradient_clip and early_stopping_patience cannot be negative"
         )
+    if args.checkpoint_every < 0:
+        raise ValueError("checkpoint_every cannot be negative")
 
     set_seed(args.seed)
     device = resolve_device(args.device)
@@ -746,6 +748,23 @@ def train(args: argparse.Namespace) -> None:
             optimizer,
             state,
         )
+        if args.checkpoint_every and epoch % args.checkpoint_every == 0:
+            periodic_path = checkpoint_path.with_name(
+                f"{checkpoint_path.stem}.epoch-{epoch:04d}{checkpoint_path.suffix}"
+            )
+            save_checkpoint(
+                periodic_path,
+                model,
+                config,
+                zscores,
+                training_config,
+                epoch,
+                validation["loss"],
+                args.model,
+                optimizer,
+                state,
+            )
+            print(f"periodic_checkpoint={periodic_path}")
         if (
             args.early_stopping_patience
             and stale_epochs >= args.early_stopping_patience
@@ -957,6 +976,12 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument("--num-workers", type=int, default=0)
     train_parser.add_argument("--device", default="auto")
+    train_parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=0,
+        help="save a resumable checkpoint every N epochs; 0 disables",
+    )
     train_parser.add_argument("--early-stopping-patience", type=int, default=10)
     train_parser.add_argument(
         "--resume",
