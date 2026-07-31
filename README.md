@@ -105,3 +105,20 @@ features to both the historical observations and future NAQFC inputs:
 
 Select either with `pm25_transformer.py train --model MODEL_NAME`. The original
 `transformer` and `transformer-no-patches` inputs and checkpoints are unchanged.
+
+## Resume interrupted training
+
+Training writes a recovery checkpoint after every completed epoch alongside the
+best-model checkpoint. For `--checkpoint model.pt`, the recovery file is
+`checkpoints/model.last.pt`.
+
+Re-run the original training command with `--resume`. The `--epochs` value is
+the total target, not the number of additional epochs:
+
+```bat
+.venv\Scripts\python.exe pm25_transformer.py train ... --checkpoint model.pt --epochs 50 --resume
+```
+
+If the recovery file does not exist for an older run, `--resume` falls back to
+the best-model checkpoint and starts a fresh optimizer. Subsequent epochs create
+the full recovery checkpoint.

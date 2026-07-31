@@ -172,22 +172,26 @@ def save_checkpoint(
     epoch: int,
     validation_loss: float,
     model_name: str = DEFAULT_MODEL,
+    optimizer: torch.optim.Optimizer | None = None,
+    training_state: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp")
-    torch.save(
-        {
-            "format_version": CHECKPOINT_FORMAT_VERSION,
-            "model_name": model_name,
-            "model_config": asdict(config),
-            "normalization": asdict(zscores),
-            "training_config": training_config,
-            "epoch": epoch,
-            "validation_loss": validation_loss,
-            "model_state": model.state_dict(),
-        },
-        temporary,
-    )
+    checkpoint = {
+        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "model_name": model_name,
+        "model_config": asdict(config),
+        "normalization": asdict(zscores),
+        "training_config": training_config,
+        "epoch": epoch,
+        "validation_loss": validation_loss,
+        "model_state": model.state_dict(),
+    }
+    if optimizer is not None:
+        checkpoint["optimizer_state"] = optimizer.state_dict()
+    if training_state is not None:
+        checkpoint["training_state"] = training_state
+    torch.save(checkpoint, temporary)
     temporary.replace(path)
 
 
@@ -196,6 +200,10 @@ def output_filename(value: str) -> Path:
     if path.name != value:
         raise argparse.ArgumentTypeError("must be a file name, not a path")
     return path
+
+
+def recovery_checkpoint_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.last{path.suffix}")
 
 
 def load_checkpoint(
@@ -516,6 +524,7 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = resolve_device(args.device)
     checkpoint_path = CHECKPOINT_DIR / args.checkpoint
+    recovery_path = recovery_checkpoint_path(checkpoint_path)
     training_config = {
         "model": args.model,
         "pairs": str(args.pairs.resolve()),
@@ -573,14 +582,34 @@ def train(args: argparse.Namespace) -> None:
             f"selected={report['selected_training_anchors']} "
             f"quota_per_cell={report['quota_per_cell']}"
         )
-    zscores = fit_zscores(loaders.train)
-    model = build_model(args.model, config).to(device)
     loss_function = make_loss(args.loss, args.huber_delta)
+    if args.resume:
+        resume_path = recovery_path if recovery_path.is_file() else checkpoint_path
+        model, resumed_config, zscores, checkpoint = load_checkpoint(
+            resume_path, device
+        )
+        saved_training_config = dict(checkpoint["training_config"])
+        for key in ("device", "epochs"):
+            saved_training_config.pop(key, None)
+            training_config.pop(key, None)
+        if resumed_config != config or saved_training_config != training_config:
+            raise ValueError("resume arguments do not match the recovery checkpoint")
+        training_config["device"] = args.device
+        training_config["epochs"] = args.epochs
+    else:
+        zscores = fit_zscores(loaders.train)
+        model = build_model(args.model, config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
+    if args.resume:
+        has_training_state = (
+            "optimizer_state" in checkpoint and "training_state" in checkpoint
+        )
+        if has_training_state:
+            optimizer.load_state_dict(checkpoint["optimizer_state"])
     counts = {
         name: len(getattr(loaders, name).dataset)
         for name in ("train", "validation", "temporal_test", "location_test")
@@ -598,12 +627,52 @@ def train(args: argparse.Namespace) -> None:
         f"std={zscores.forecast_std:.6g}"
     )
 
-    best_loss = math.inf
-    stale_epochs = 0
-    training_losses = []
-    validation_losses = []
+    if args.resume and has_training_state:
+        state = checkpoint["training_state"]
+        start_epoch = checkpoint["epoch"]
+        if start_epoch >= args.epochs:
+            raise ValueError(
+                f"recovery checkpoint already completed {start_epoch} epochs; "
+                "--epochs must be greater"
+            )
+        best_loss = state["best_loss"]
+        stale_epochs = state["stale_epochs"]
+        training_losses = state["training_losses"]
+        validation_losses = state["validation_losses"]
+        random.setstate(state["python_random_state"])
+        np.random.set_state(state["numpy_random_state"])
+        torch.set_rng_state(state["torch_random_state"].cpu())
+        loaders.train.generator.set_state(state["loader_random_state"].cpu())
+        if state["device_type"] == device.type and device.type != "cpu":
+            getattr(torch, device.type).set_rng_state(
+                state["device_random_state"].cpu(), device
+            )
+        print(f"resuming={resume_path} completed_epochs={start_epoch}")
+    elif args.resume:
+        start_epoch = checkpoint["epoch"]
+        if start_epoch >= args.epochs:
+            raise ValueError(
+                f"checkpoint already completed {start_epoch} epochs; "
+                "--epochs must be greater"
+            )
+        best_loss = checkpoint["validation_loss"]
+        stale_epochs = 0
+        training_losses = [math.nan] * start_epoch
+        validation_losses = [math.nan] * start_epoch
+        validation_losses[-1] = best_loss
+        set_seed(args.seed)
+        print(
+            f"resuming_weights={resume_path} completed_epochs={start_epoch} "
+            "optimizer=fresh"
+        )
+    else:
+        start_epoch = 0
+        best_loss = math.inf
+        stale_epochs = 0
+        training_losses = []
+        validation_losses = []
     started = time.perf_counter()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         training = run_epoch(
             model,
             loaders.train,
@@ -619,7 +688,9 @@ def train(args: argparse.Namespace) -> None:
         training_losses.append(training["loss"])
         validation_losses.append(validation["loss"])
         elapsed = time.perf_counter() - started
-        estimated_remaining = elapsed / epoch * (args.epochs - epoch)
+        estimated_remaining = (
+            elapsed / (epoch - start_epoch) * (args.epochs - epoch)
+        )
         print(
             f"epoch={epoch}/{args.epochs} "
             f"time_taken={format_duration(elapsed)} "
@@ -648,12 +719,39 @@ def train(args: argparse.Namespace) -> None:
             )
         else:
             stale_epochs += 1
-            if (
-                args.early_stopping_patience
-                and stale_epochs >= args.early_stopping_patience
-            ):
-                print(f"early stopping after {epoch} epochs")
-                break
+        state = {
+            "best_loss": best_loss,
+            "stale_epochs": stale_epochs,
+            "training_losses": training_losses,
+            "validation_losses": validation_losses,
+            "python_random_state": random.getstate(),
+            "numpy_random_state": np.random.get_state(),
+            "torch_random_state": torch.get_rng_state(),
+            "loader_random_state": loaders.train.generator.get_state(),
+            "device_type": device.type,
+        }
+        if device.type != "cpu":
+            state["device_random_state"] = getattr(
+                torch, device.type
+            ).get_rng_state(device)
+        save_checkpoint(
+            recovery_path,
+            model,
+            config,
+            zscores,
+            training_config,
+            epoch,
+            validation["loss"],
+            args.model,
+            optimizer,
+            state,
+        )
+        if (
+            args.early_stopping_patience
+            and stale_epochs >= args.early_stopping_patience
+        ):
+            print(f"early stopping after {epoch} epochs")
+            break
     loss_plot = DEFAULT_GRAPH_DIR / (
         args.loss_plot or args.checkpoint.with_suffix(".loss.png")
     )
@@ -662,6 +760,7 @@ def train(args: argparse.Namespace) -> None:
     )
     print(
         f"best_{args.loss}={best_loss:.6g} checkpoint={checkpoint_path} "
+        f"recovery_checkpoint={recovery_path} "
         f"loss_plot={loss_plot} "
         f"time_taken={format_duration(time.perf_counter() - started)}"
     )
@@ -859,6 +958,11 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--num-workers", type=int, default=0)
     train_parser.add_argument("--device", default="auto")
     train_parser.add_argument("--early-stopping-patience", type=int, default=10)
+    train_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue from the last completed epoch in CHECKPOINT_STEM.last.pt",
+    )
     train_parser.set_defaults(function=train)
 
     infer_parser = commands.add_parser(
