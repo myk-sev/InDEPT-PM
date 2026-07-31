@@ -151,6 +151,7 @@ def run_epoch(
         absolute_total += error.abs().sum().item()
         squared_total += error.square().sum().item()
         count += elements
+        time.sleep(0.1)
 
     if not count:
         raise ValueError("data loader contains no samples")
@@ -601,6 +602,7 @@ def train(args: argparse.Namespace) -> None:
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
+        foreach=False,
     )
     if args.resume:
         has_training_state = (

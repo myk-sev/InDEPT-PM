@@ -7,6 +7,7 @@ from .cyclical_transformers import (
 from .delta_models import (
     DeltaCyclicalDualEncoderPatchTransformer,
     DeltaCyclicalDualEncoderTransformer,
+    DeltaCyclicalPatchTST,
     DeltaPatchTST,
 )
 from .dual_encoder_patch_transformer import (
@@ -22,6 +23,8 @@ from .dual_encoder_transformer import (
 )
 from .patchtst import (
     ChannelIndependentPatchEmbedding,
+    CyclicalPatchTST,
+    CyclicalPatchTSTConfig,
     PatchTST,
     PatchTSTConfig,
 )
@@ -40,6 +43,7 @@ ModelConfig = (
     | TimestepTransformerConfig
     | CyclicalPatchTransformerConfig
     | CyclicalTimestepTransformerConfig
+    | CyclicalPatchTSTConfig
     | PatchTSTConfig
 )
 
@@ -62,6 +66,7 @@ register_model(
     CyclicalTimestepTransformerConfig,
 )
 register_model("patchtst", PatchTST, PatchTSTConfig)
+register_model("patchtst-cyclical", CyclicalPatchTST, CyclicalPatchTSTConfig)
 register_model(
     "transformer-cyclical-delta",
     DeltaCyclicalDualEncoderPatchTransformer,
@@ -73,6 +78,11 @@ register_model(
     CyclicalTimestepTransformerConfig,
 )
 register_model("patchtst-delta", DeltaPatchTST, PatchTSTConfig)
+register_model(
+    "patchtst-cyclical-delta",
+    DeltaCyclicalPatchTST,
+    CyclicalPatchTSTConfig,
+)
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -80,10 +90,13 @@ __all__ = [
     "ChannelIndependentPatchEmbedding",
     "CyclicalDualEncoderPatchTransformer",
     "CyclicalDualEncoderTransformer",
+    "CyclicalPatchTST",
+    "CyclicalPatchTSTConfig",
     "CyclicalPatchTransformerConfig",
     "CyclicalTimestepTransformerConfig",
     "DeltaCyclicalDualEncoderPatchTransformer",
     "DeltaCyclicalDualEncoderTransformer",
+    "DeltaCyclicalPatchTST",
     "DeltaPatchTST",
     "DualEncoderPatchTransformer",
     "DualEncoderTransformer",

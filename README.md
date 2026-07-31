@@ -115,6 +115,11 @@ returning absolute PM2.5 predictions:
 - `transformer-no-patches-cyclical-delta`
 - `patchtst-delta`
 
+PatchTST also has cyclical-input versions:
+
+- `patchtst-cyclical`
+- `patchtst-cyclical-delta`
+
 ## Resume interrupted training
 
 Training writes a recovery checkpoint after every completed epoch alongside the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -61,6 +62,9 @@ class ChannelIndependentPatchEmbedding(nn.Module):
 class PatchTST(nn.Module):
     """Encode each input channel independently, then forecast indoor PM2.5."""
 
+    history_feature_count = 8
+    forecast_feature_count = 1
+
     def __init__(self, config: PatchTSTConfig) -> None:
         super().__init__()
         self.config = config
@@ -79,10 +83,12 @@ class PatchTST(nn.Module):
         self.history_encoder = _encoder(config, "history")
         self.forecast_encoder = _encoder(config, "forecast")
         head_width = (
-            8
+            self.history_feature_count
             * self.history_patches.patch_count
             * config.history_embedding_dim
-            + self.forecast_patches.patch_count * config.forecast_embedding_dim
+            + self.forecast_feature_count
+            * self.forecast_patches.patch_count
+            * config.forecast_embedding_dim
         )
         self.head = nn.Sequential(
             nn.Flatten(),
@@ -96,10 +102,11 @@ class PatchTST(nn.Module):
         history = _missing_aware_history(history)
         if forecast.ndim != 3 or tuple(forecast.shape[1:]) != (
             self.config.prediction_hours,
-            1,
+            self.forecast_feature_count,
         ):
             raise ValueError(
-                f"expected forecast [batch, {self.config.prediction_hours}, 1], "
+                f"expected forecast [batch, {self.config.prediction_hours}, "
+                f"{self.forecast_feature_count}], "
                 f"received {list(forecast.shape)}"
             )
         encoded = torch.cat(
@@ -125,10 +132,24 @@ class PatchTST(nn.Module):
         return encoded.reshape(batch, channels * patches * width)
 
 
+@dataclass(frozen=True)
+class CyclicalPatchTSTConfig(PatchTSTConfig):
+    cyclical_time: ClassVar[bool] = True
+
+
+class CyclicalPatchTST(PatchTST):
+    """PatchTST with daily, weekly, and annual cycles."""
+
+    history_feature_count = 10
+    forecast_feature_count = 7
+
+
 Model = PatchTST
 
 __all__ = [
     "ChannelIndependentPatchEmbedding",
+    "CyclicalPatchTST",
+    "CyclicalPatchTSTConfig",
     "PatchTST",
     "PatchTSTConfig",
     "Model",

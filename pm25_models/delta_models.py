@@ -6,7 +6,7 @@ from .cyclical_transformers import (
     CyclicalDualEncoderPatchTransformer,
     CyclicalDualEncoderTransformer,
 )
-from .patchtst import PatchTST
+from .patchtst import CyclicalPatchTST, PatchTST
 
 
 class _DeltaFromLastHour:
@@ -33,8 +33,13 @@ class DeltaPatchTST(_DeltaFromLastHour, PatchTST):
     """Predict indoor PM2.5 changes with PatchTST."""
 
 
+class DeltaCyclicalPatchTST(_DeltaFromLastHour, CyclicalPatchTST):
+    """Predict indoor PM2.5 changes with cyclical PatchTST."""
+
+
 __all__ = [
     "DeltaCyclicalDualEncoderPatchTransformer",
     "DeltaCyclicalDualEncoderTransformer",
+    "DeltaCyclicalPatchTST",
     "DeltaPatchTST",
 ]
