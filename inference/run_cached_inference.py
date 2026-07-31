@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 
+from pm25_models import DEFAULT_MODEL
 from pm25_transformer import (
     load_checkpoint,
     normalize_batch,
@@ -94,7 +95,8 @@ def main() -> None:
     selected = [by_index[index] for index in requested]
 
     device = resolve_device(args.device)
-    model, config, zscores, _ = load_checkpoint(args.checkpoint, device)
+    model, config, zscores, checkpoint = load_checkpoint(args.checkpoint, device)
+    model_name = checkpoint.get("model_name", DEFAULT_MODEL)
     validate_data_contract(cache, records, config)
 
     samples = [record["sample"] for record in selected]
@@ -118,7 +120,7 @@ def main() -> None:
             if name
             else f"{split.replace('-', '_')}_sample_{index}.png"
         )
-        output = args.output_dir / filename
+        output = args.output_dir / f"{model_name}_{filename}"
         plot_prediction(
             output,
             record["sample"],
@@ -127,6 +129,7 @@ def main() -> None:
             record["location_id"],
             split,
             index,
+            model_name=model_name,
         )
         label = f"{name}={index}" if name else str(index)
         print(f"saved sample {label}: {output}")

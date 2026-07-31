@@ -151,7 +151,6 @@ def run_epoch(
         absolute_total += error.abs().sum().item()
         squared_total += error.square().sum().item()
         count += elements
-        time.sleep(0.1)
 
     if not count:
         raise ValueError("data loader contains no samples")
@@ -231,6 +230,8 @@ def plot_prediction(
     location_id: str,
     split: str,
     sample_index: int,
+    *,
+    model_name: str | None = None,
 ) -> None:
     import matplotlib
 
@@ -381,8 +382,10 @@ def plot_prediction(
         frameon=False,
         fontsize=9,
     )
+    title_prefix = f"{model_name}: " if model_name else ""
     figure.suptitle(
-        f"Model error averaged {mae:.2f} µg/m³ over {config.prediction_hours} hours",
+        f"{title_prefix}Model error averaged {mae:.2f} µg/m³ "
+        f"over {config.prediction_hours} hours",
         y=0.99,
         fontsize=16,
     )
