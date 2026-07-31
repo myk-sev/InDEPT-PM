@@ -93,19 +93,22 @@ class PatchEmbedding(nn.Module):
 
 
 class DualEncoderPatchTransformer(nn.Module):
+    history_feature_count = 8
+    forecast_feature_count = 1
+
     def __init__(self, config: PatchTransformerConfig) -> None:
         super().__init__()
         self.config = config
         self.history_patches = PatchEmbedding(
             config.history_hours,
-            8,
+            self.history_feature_count,
             config.history_patch_size,
             config.history_patch_stride,
             config.history_embedding_dim,
         )
         self.forecast_patches = PatchEmbedding(
             config.prediction_hours,
-            1,
+            self.forecast_feature_count,
             config.forecast_patch_size,
             config.forecast_patch_stride,
             config.forecast_embedding_dim,
@@ -159,9 +162,9 @@ class DualEncoderPatchTransformer(nn.Module):
 
 def _missing_aware_history(history: torch.Tensor) -> torch.Tensor:
     """Append availability and normalized recency to normalized history."""
-    if history.ndim != 3 or history.shape[2] != 6:
+    if history.ndim != 3 or history.shape[2] not in {6, 8}:
         raise ValueError(
-            "history must contain outdoor PM2.5, indoor PM2.5, and four time features"
+            "history must contain outdoor PM2.5, indoor PM2.5, and time features"
         )
 
     available = torch.isfinite(history[..., :1])

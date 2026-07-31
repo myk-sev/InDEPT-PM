@@ -47,8 +47,9 @@ class DualEncoderDataset(Dataset):
     """Hourly history, forecast, and future-indoor-PM2.5 windows.
 
     History features are sparse TEMPO outdoor PM2.5, complete PurpleAir indoor
-    PM2.5, normalized UTC hour, weekday, month, and day. Forecasts and targets
-    begin one hour after the anchor.
+    PM2.5, and UTC time features. Forecasts and targets begin one hour after the
+    anchor. Cyclical mode supplies daily, weekly, and annual sine/cosine pairs
+    to both the history and forecast inputs.
     """
 
     def __init__(
@@ -62,6 +63,7 @@ class DualEncoderDataset(Dataset):
         minimum_outdoor_history_hours: int = 24,
         maximum_outdoor_age_hours: int = 48,
         excluded_sensors_path: str | Path | None = None,
+        cyclical_time: bool = False,
     ) -> None:
         if history_hours < 1 or forecast_hours < 1:
             raise ValueError("history_hours and forecast_hours must be positive")
@@ -106,7 +108,13 @@ class DualEncoderDataset(Dataset):
         self.timestamps = torch.from_numpy(timestamps)
         self.observations = torch.from_numpy(observations)
         self.forecasts = torch.from_numpy(forecasts)
-        self.time_features = torch.from_numpy(_calendar_features(timestamps))
+        time_features = (
+            _cyclical_time_features(timestamps)
+            if cyclical_time
+            else _calendar_features(timestamps)
+        )
+        self.time_features = torch.from_numpy(time_features)
+        self.cyclical_time = cyclical_time
         self._steps = len(timestamps)
         self._cycles = cycles
         self._anchor_cycles, self._anchor_leads = _align_forecast_cycles(
@@ -149,6 +157,11 @@ class DualEncoderDataset(Dataset):
         forecast = self.forecasts[
             cycle, location, lead : lead + self.forecast_hours
         ].unsqueeze(1)
+        if self.cyclical_time:
+            forecast = torch.cat(
+                (forecast, self.time_features[anchor + 1 : target_end]),
+                dim=1,
+            )
         target = self.observations[location, anchor + 1 : target_end, 1]
 
         return {
@@ -775,6 +788,27 @@ def _calendar_features(timestamps: np.ndarray) -> np.ndarray:
     month = (months.astype(np.int64) % 12).astype(np.float32) / 11
     day = (days - months.astype("datetime64[D]")).astype(np.float32) / 30
     return np.column_stack((hour, weekday, month, day)).astype(np.float32)
+
+
+def _cyclical_time_features(timestamps: np.ndarray) -> np.ndarray:
+    datetimes = timestamps.astype("datetime64[s]")
+    days = datetimes.astype("datetime64[D]")
+    years = datetimes.astype("datetime64[Y]")
+    hours = (datetimes - days).astype("timedelta64[s]").astype(np.float64) / 3600
+    weekdays = ((days.astype(np.int64) + 3) % 7) + hours / 24
+    next_years = (years.astype(np.int64) + 1).astype("datetime64[Y]")
+    year_seconds = (
+        next_years.astype("datetime64[s]") - years.astype("datetime64[s]")
+    ).astype("timedelta64[s]").astype(np.float64)
+    elapsed_seconds = (
+        datetimes - years.astype("datetime64[s]")
+    ).astype("timedelta64[s]").astype(np.float64)
+    phases = 2 * np.pi * np.column_stack(
+        (hours / 24, weekdays / 7, elapsed_seconds / year_seconds)
+    )
+    return np.stack((np.sin(phases), np.cos(phases)), axis=2).reshape(
+        len(timestamps), -1
+    ).astype(np.float32)
 
 
 def _require_columns(schema: pa.Schema, columns: tuple[str, ...], path: Path) -> None:

@@ -100,14 +100,21 @@ class TimestepEmbedding(nn.Module):
 class DualEncoderTransformer(nn.Module):
     """Predict future indoor PM2.5 without grouping inputs into patches."""
 
+    history_feature_count = 8
+    forecast_feature_count = 1
+
     def __init__(self, config: TimestepTransformerConfig) -> None:
         super().__init__()
         self.config = config
         self.history_embedding = TimestepEmbedding(
-            config.history_hours, 8, config.history_embedding_dim
+            config.history_hours,
+            self.history_feature_count,
+            config.history_embedding_dim,
         )
         self.forecast_embedding = TimestepEmbedding(
-            config.prediction_hours, 1, config.forecast_embedding_dim
+            config.prediction_hours,
+            self.forecast_feature_count,
+            config.forecast_embedding_dim,
         )
         self.history_encoder = _encoder(config, "history")
         self.forecast_encoder = _encoder(config, "forecast")
@@ -157,9 +164,9 @@ class DualEncoderTransformer(nn.Module):
 
 
 def _missing_aware_history(history: torch.Tensor) -> torch.Tensor:
-    if history.ndim != 3 or history.shape[2] != 6:
+    if history.ndim != 3 or history.shape[2] not in {6, 8}:
         raise ValueError(
-            "history must contain outdoor PM2.5, indoor PM2.5, and four time features"
+            "history must contain outdoor PM2.5, indoor PM2.5, and time features"
         )
 
     available = torch.isfinite(history[..., :1])

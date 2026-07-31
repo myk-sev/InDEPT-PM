@@ -94,3 +94,14 @@ memory:
 SELECT *
 FROM read_parquet('naqfc_output/model_version=*/year=*/month=*/*.parquet');
 ```
+
+## Cyclical-time model variants
+
+Two additional model names add UTC daily, weekly, and annual sine/cosine
+features to both the historical observations and future NAQFC inputs:
+
+- `transformer-cyclical` uses patches.
+- `transformer-no-patches-cyclical` uses one token per hour.
+
+Select either with `pm25_transformer.py train --model MODEL_NAME`. The original
+`transformer` and `transformer-no-patches` inputs and checkpoints are unchanged.
