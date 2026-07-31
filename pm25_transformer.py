@@ -28,8 +28,9 @@ from pm25_models import (
 
 
 CHECKPOINT_FORMAT_VERSION = 2
-DEFAULT_CHECKPOINT = Path("checkpoints/pm25_transformer.pt")
+CHECKPOINT_DIR = Path("checkpoints")
 DEFAULT_GRAPH_DIR = Path("graphs")
+DEFAULT_CHECKPOINT = Path("pm25_transformer.pt")
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ def fit_zscores(batches: Iterable[dict[str, torch.Tensor]]) -> ZScores:
         _accumulate(indoor, batch["history"][..., 1])
         _accumulate(indoor, batch["target"])
         _accumulate(history_outdoor, batch["history"][..., 0])
-        _accumulate(forecast, batch["forecast"])
+        _accumulate(forecast, batch["forecast"][..., 0])
     indoor_mean, indoor_std = _mean_std(indoor, "indoor")
     history_mean, history_std = _mean_std(history_outdoor, "historical outdoor")
     forecast_mean, forecast_std = _mean_std(forecast, "forecast")
@@ -98,7 +99,7 @@ def normalize_batch(
         zscores.history_outdoor_std
     )
     history[..., 1].sub_(zscores.indoor_mean).div_(zscores.indoor_std)
-    forecast.sub_(zscores.forecast_mean).div_(zscores.forecast_std)
+    forecast[..., 0].sub_(zscores.forecast_mean).div_(zscores.forecast_std)
     target.sub_(zscores.indoor_mean).div_(zscores.indoor_std)
     return history, forecast, target
 
@@ -190,6 +191,13 @@ def save_checkpoint(
     temporary.replace(path)
 
 
+def output_filename(value: str) -> Path:
+    path = Path(value)
+    if path.name != value:
+        raise argparse.ArgumentTypeError("must be a file name, not a path")
+    return path
+
+
 def load_checkpoint(
     path: Path, device: torch.device
 ) -> tuple[nn.Module, ModelConfig, ZScores, dict]:
@@ -224,7 +232,7 @@ def plot_prediction(
     history_hours = np.arange(-config.history_hours + 1, 1)
     future_hours = np.arange(1, config.prediction_hours + 1)
     history = sample["history"].cpu().numpy()
-    forecast = sample["forecast"].squeeze(1).cpu().numpy()
+    forecast = sample["forecast"][:, 0].cpu().numpy()
     target = sample["target"].cpu().numpy()
     predicted = prediction.detach().cpu().numpy()
     error = predicted - target
@@ -478,6 +486,7 @@ def build_loaders(
             "maximum_outdoor_age_hours", 48
         ),
         excluded_sensors_path=excluded_sensors,
+        cyclical_time=getattr(config, "cyclical_time", False),
     )
     loaders = create_data_loaders(
         dataset,
@@ -506,6 +515,7 @@ def train(args: argparse.Namespace) -> None:
 
     set_seed(args.seed)
     device = resolve_device(args.device)
+    checkpoint_path = CHECKPOINT_DIR / args.checkpoint
     training_config = {
         "model": args.model,
         "pairs": str(args.pairs.resolve()),
@@ -627,7 +637,7 @@ def train(args: argparse.Namespace) -> None:
             best_loss = validation["loss"]
             stale_epochs = 0
             save_checkpoint(
-                args.checkpoint,
+                checkpoint_path,
                 model,
                 config,
                 zscores,
@@ -644,14 +654,14 @@ def train(args: argparse.Namespace) -> None:
             ):
                 print(f"early stopping after {epoch} epochs")
                 break
-    loss_plot = args.loss_plot or args.checkpoint.with_suffix(".loss.png")
-    if args.loss_plot is None and args.checkpoint == DEFAULT_CHECKPOINT:
-        loss_plot = DEFAULT_GRAPH_DIR / loss_plot.name
+    loss_plot = DEFAULT_GRAPH_DIR / (
+        args.loss_plot or args.checkpoint.with_suffix(".loss.png")
+    )
     plot_training_losses(
         loss_plot, training_losses, validation_losses, training, validation
     )
     print(
-        f"best_{args.loss}={best_loss:.6g} checkpoint={args.checkpoint} "
+        f"best_{args.loss}={best_loss:.6g} checkpoint={checkpoint_path} "
         f"loss_plot={loss_plot} "
         f"time_taken={format_duration(time.perf_counter() - started)}"
     )
@@ -659,7 +669,9 @@ def train(args: argparse.Namespace) -> None:
 
 def infer(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
-    model, config, zscores, checkpoint = load_checkpoint(args.checkpoint, device)
+    model, config, zscores, checkpoint = load_checkpoint(
+        CHECKPOINT_DIR / args.checkpoint, device
+    )
     training_config = dict(checkpoint["training_config"])
     training_config["batch_size"] = 1
     training_config["num_workers"] = 0
@@ -713,7 +725,7 @@ def infer(args: argparse.Namespace) -> None:
         prediction = zscores.denormalize_indoor(model(history, forecast))[0]
     location_index = int(sample["location_index"])
     plot_prediction(
-        args.output,
+        DEFAULT_GRAPH_DIR / args.output,
         sample,
         prediction,
         config,
@@ -721,7 +733,7 @@ def infer(args: argparse.Namespace) -> None:
         args.split,
         args.sample_index,
     )
-    print(f"saved diagnostic graph: {args.output}")
+    print(f"saved diagnostic graph: {DEFAULT_GRAPH_DIR / args.output}")
 
 def _add_stream_arguments(
     parser: argparse.ArgumentParser, stream: str, patches: bool
@@ -813,11 +825,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="CSV with a sensor_id column; removes sensors from every split",
     )
-    train_parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    train_parser.add_argument(
+        "--checkpoint",
+        type=output_filename,
+        default=DEFAULT_CHECKPOINT,
+        help="checkpoint file name saved under checkpoints/",
+    )
     train_parser.add_argument(
         "--loss-plot",
-        type=Path,
-        help="training loss graph (default: graphs/<checkpoint stem>.loss.png)",
+        type=output_filename,
+        help="training loss graph file name saved under graphs/",
     )
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
@@ -863,7 +880,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="override the excluded sensor CSV recorded in the checkpoint",
     )
-    infer_parser.add_argument("--checkpoint", type=Path, required=True)
+    infer_parser.add_argument(
+        "--checkpoint",
+        type=output_filename,
+        required=True,
+        help="checkpoint file name loaded from checkpoints/",
+    )
     infer_parser.add_argument(
         "--split",
         choices=("train", "validation", "temporal-test", "location-test"),
@@ -871,7 +893,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer_parser.add_argument("--sample-index", type=int, default=0)
     infer_parser.add_argument(
-        "--output", type=Path, default=DEFAULT_GRAPH_DIR / "pm25_inference.png"
+        "--output",
+        type=output_filename,
+        default=Path("pm25_inference.png"),
+        help="diagnostic graph file name saved under graphs/",
     )
     infer_parser.add_argument("--device", default="auto")
     infer_parser.set_defaults(function=infer)
