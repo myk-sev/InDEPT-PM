@@ -24,6 +24,11 @@ from purpleair_pair_exclusions.outdoor_quality import (
     OutdoorExclusion,
     read_outdoor_exclusions,
 )
+from purpleair_pair_exclusions.outdoor_sensor_error import (
+    ErrorLevelCriteria,
+    ErrorLevelPeriod,
+    detect_error_level_periods,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,22 +46,55 @@ PERIOD_FIELDS = (
     "median_indoor_rise_pm25",
     "median_peak_response_ratio",
     "median_area_response_ratio",
+    "error_level_periods",
+    "error_level_readings",
+    "first_error_level_utc",
+    "last_error_level_utc",
+    "candidate_signals",
     "known_exclusion_overlap",
     "selected_for_review",
     "selection_reason",
+)
+PERIOD_EVENT_FIELDS = EVENT_FIELDS + ("selected_for_period_review",)
+ERROR_LEVEL_FIELDS = (
+    "outdoor_sensor_id",
+    "outdoor_name",
+    "period_start_utc",
+    "period_end_utc",
+    "readings",
+    "minimum_pm25",
+    "maximum_pm25",
 )
 
 
 @dataclass(frozen=True)
 class PeriodCriteria:
-    minimum_events: int = 4
+    minimum_events: int = 3
     minimum_low_response_rate: float = 0.55
+    maximum_peak_response_ratio: float = 0.10
+    maximum_area_response_ratio: float = 0.10
 
     def validate(self) -> None:
         if self.minimum_events < 1:
             raise ValueError("minimum_events must be at least one")
-        if not 0 <= self.minimum_low_response_rate <= 1:
-            raise ValueError("minimum_low_response_rate must be between zero and one")
+        rates = (
+            self.minimum_low_response_rate,
+            self.maximum_peak_response_ratio,
+            self.maximum_area_response_ratio,
+        )
+        if any(not 0 <= value <= 1 for value in rates):
+            raise ValueError("rates and ratios must be between zero and one")
+
+
+def is_period_low_response(
+    event: dict[str, object], criteria: PeriodCriteria
+) -> bool:
+    return "outdoor_rise_pm25" in event and (
+        float(event["peak_response_ratio"])
+        <= criteria.maximum_peak_response_ratio
+        and float(event["area_response_ratio"])
+        <= criteria.maximum_area_response_ratio
+    )
 
 
 def read_pairs(path: Path) -> list[dict[str, object]]:
@@ -110,8 +148,12 @@ def period_rows(
     events: list[dict[str, object]],
     exclusions: tuple[OutdoorExclusion, ...],
     criteria: PeriodCriteria,
+    pairs: list[dict[str, object]] | None = None,
+    error_periods: dict[tuple[int, int], tuple[ErrorLevelPeriod, ...]] | None = None,
 ) -> list[dict[str, object]]:
     criteria.validate()
+    pairs, error_periods = pairs or [], error_periods or {}
+    pair_by_outdoor = {int(row["outdoor_sensor_id"]): row for row in pairs}
     grouped: dict[tuple[int, int, int], list[dict[str, object]]] = defaultdict(list)
     for event in events:
         if "outdoor_rise_pm25" not in event:
@@ -122,27 +164,34 @@ def period_rows(
         grouped[
             (int(event["indoor_sensor_id"]), int(event["outdoor_sensor_id"]), year)
         ].append(event)
+    for outdoor, year in error_periods:
+        if not any(key[1:] == (outdoor, year) for key in grouped):
+            pair = pair_by_outdoor[outdoor]
+            grouped[(int(pair["indoor_sensor_id"]), outdoor, year)] = []
 
     rows = []
-    for (_, outdoor_id, year), group in sorted(grouped.items()):
+    for (indoor_id, outdoor_id, year), group in sorted(grouped.items()):
+        pair = group[0] if group else pair_by_outdoor[outdoor_id]
+        errors = error_periods.get((outdoor_id, year), ())
         start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
         end = int(datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp())
-        selected_events = sum(bool(row["selected_for_exclusion"]) for row in group)
-        rate = selected_events / len(group)
-        selected = (
+        selected_events = sum(is_period_low_response(row, criteria) for row in group)
+        rate = selected_events / len(group) if group else 0.0
+        response_selected = (
             selected_events >= criteria.minimum_events
             and rate >= criteria.minimum_low_response_rate
         )
+        selected = response_selected or bool(errors)
         known = any(
             item.sensor_id == outdoor_id and _intersects(item, start, end)
             for item in exclusions
         )
         rows.append(
             {
-                "indoor_sensor_id": group[0]["indoor_sensor_id"],
-                "indoor_name": group[0]["indoor_name"],
+                "indoor_sensor_id": indoor_id,
+                "indoor_name": pair["indoor_name"],
                 "outdoor_sensor_id": outdoor_id,
-                "outdoor_name": group[0]["outdoor_name"],
+                "outdoor_name": pair["outdoor_name"],
                 "period_start_utc": iso_utc(start),
                 "period_end_utc": iso_utc(end),
                 "analyzed_events": len(group),
@@ -150,12 +199,26 @@ def period_rows(
                 "low_response_rate": rate,
                 "median_indoor_rise_pm25": statistics.median(
                     float(row["indoor_rise_pm25"]) for row in group
-                ),
+                ) if group else "",
                 "median_peak_response_ratio": statistics.median(
                     float(row["peak_response_ratio"]) for row in group
-                ),
+                ) if group else "",
                 "median_area_response_ratio": statistics.median(
                     float(row["area_response_ratio"]) for row in group
+                ) if group else "",
+                "error_level_periods": len(errors),
+                "error_level_readings": sum(item.readings for item in errors),
+                "first_error_level_utc": iso_utc(min(item.start for item in errors))
+                if errors else "",
+                "last_error_level_utc": iso_utc(max(item.end for item in errors))
+                if errors else "",
+                "candidate_signals": ";".join(
+                    name
+                    for present, name in (
+                        (response_selected, "repeated_low_response"),
+                        (bool(errors), "recurring_error_level"),
+                    )
+                    if present
                 ),
                 "known_exclusion_overlap": known,
                 "selected_for_review": selected,
@@ -261,6 +324,8 @@ def write_outputs(
     period_criteria: PeriodCriteria,
     inputs: dict[str, object],
     complete_pairs: int,
+    error_rows: list[dict[str, object]],
+    error_criteria: ErrorLevelCriteria,
 ) -> dict[str, object]:
     output.mkdir(parents=True, exist_ok=True)
     candidates = [row for row in periods if row["selected_for_review"]]
@@ -271,6 +336,24 @@ def write_outputs(
         "scope": "review-only outdoor failure-period candidates; no exclusions are applied",
         "complete_pairs": complete_pairs,
         "analyzed_events": sum("outdoor_rise_pm25" in row for row in events),
+        "strict_low_response_events": sum(
+            bool(row["selected_for_exclusion"]) for row in events
+        ),
+        "period_low_response_events": sum(
+            is_period_low_response(row, period_criteria) for row in events
+        ),
+        "additional_proportional_low_response_events": sum(
+            is_period_low_response(row, period_criteria)
+            and not bool(row["selected_for_exclusion"])
+            for row in events
+        ),
+        "error_level_periods": len(error_rows),
+        "error_level_sensor_years": len(
+            {
+                (row["outdoor_sensor_id"], str(row["period_start_utc"])[:4])
+                for row in error_rows
+            }
+        ),
         "sensor_years": len(periods),
         "candidate_sensor_years": len(candidates),
         "recovered_known_sensor_years": sum(
@@ -291,12 +374,22 @@ def write_outputs(
         ),
         "event_criteria": asdict(event_criteria),
         "period_criteria": asdict(period_criteria),
+        "error_level_criteria": asdict(error_criteria),
         "inputs": inputs,
     }
-    write_csv(output / "event_scores.csv", EVENT_FIELDS, events)
+    write_csv(
+        output / "event_scores.csv",
+        PERIOD_EVENT_FIELDS,
+        [
+            row
+            | {"selected_for_period_review": is_period_low_response(row, period_criteria)}
+            for row in events
+        ],
+    )
     write_csv(output / "period_scores.csv", PERIOD_FIELDS, periods)
     write_csv(output / "candidate_periods.csv", PERIOD_FIELDS, candidates)
     write_csv(output / "new_candidate_periods.csv", PERIOD_FIELDS, new_candidates)
+    write_csv(output / "error_level_periods.csv", ERROR_LEVEL_FIELDS, error_rows)
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )
@@ -321,8 +414,10 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("purpleair_pair_exclusions/outdoor_quality_results"),
     )
-    result.add_argument("--minimum-period-events", type=int, default=4)
+    result.add_argument("--minimum-period-events", type=int, default=3)
     result.add_argument("--minimum-low-response-rate", type=float, default=0.55)
+    result.add_argument("--maximum-peak-response-ratio", type=float, default=0.10)
+    result.add_argument("--maximum-area-response-ratio", type=float, default=0.10)
     return result
 
 
@@ -330,7 +425,10 @@ def main() -> None:
     args = parser().parse_args()
     event_criteria = Criteria()
     period_criteria = PeriodCriteria(
-        args.minimum_period_events, args.minimum_low_response_rate
+        minimum_events=args.minimum_period_events,
+        minimum_low_response_rate=args.minimum_low_response_rate,
+        maximum_peak_response_ratio=args.maximum_peak_response_ratio,
+        maximum_area_response_ratio=args.maximum_area_response_ratio,
     )
     period_criteria.validate()
     pairs = read_pairs(args.pairs)
@@ -341,8 +439,35 @@ def main() -> None:
         args.outdoor_history, {int(row["outdoor_sensor_id"]) for row in pairs}
     )
     events, coverage = analyze_pairs(pairs, indoor, outdoor, event_criteria)
+    error_criteria = ErrorLevelCriteria()
+    error_periods: dict[tuple[int, int], tuple[ErrorLevelPeriod, ...]] = {}
+    error_rows = []
+    outdoor_names = {
+        int(row["outdoor_sensor_id"]): row["outdoor_name"] for row in pairs
+    }
+    for sensor_id, readings in outdoor.items():
+        annual: dict[int, dict[int, float]] = defaultdict(dict)
+        for timestamp, value in readings.items():
+            annual[datetime.fromtimestamp(timestamp, timezone.utc).year][timestamp] = value
+        for year, values in annual.items():
+            found = detect_error_level_periods(values, error_criteria)
+            if not found:
+                continue
+            error_periods[(sensor_id, year)] = found
+            error_rows.extend(
+                {
+                    "outdoor_sensor_id": sensor_id,
+                    "outdoor_name": outdoor_names[sensor_id],
+                    "period_start_utc": iso_utc(item.start),
+                    "period_end_utc": iso_utc(item.end),
+                    "readings": item.readings,
+                    "minimum_pm25": item.minimum_pm25,
+                    "maximum_pm25": item.maximum_pm25,
+                }
+                for item in found
+            )
     exclusions = read_outdoor_exclusions(args.known_exclusions)
-    periods = period_rows(events, exclusions, period_criteria)
+    periods = period_rows(events, exclusions, period_criteria, pairs, error_periods)
     inputs = {
         "pairs": str(args.pairs.resolve()),
         "indoor_history": [str(path.resolve()) for path in args.indoor_history],
@@ -358,6 +483,8 @@ def main() -> None:
         period_criteria,
         inputs,
         sum(row["status"] == "complete_pair" for row in coverage),
+        error_rows,
+        error_criteria,
     )
     omitted = {"event_criteria", "period_criteria", "inputs"}
     print(" ".join(f"{key}={value}" for key, value in summary.items() if key not in omitted))
