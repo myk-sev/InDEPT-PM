@@ -7,6 +7,10 @@ substitute TEMPO, NAQFC, or a different outdoor sensor when history is absent.
 
 For every validated FEMA/NSD indoor school, the tool independently selects the
 nearest active-snapshot outdoor PurpleAir sensor. Outdoor reuse is allowed.
+The repository's three established indoor exclusion lists are applied before
+pairing. `excluded_indoor_purpleair_ranges.csv` masks bounded bad-reading
+periods. `excluded_outdoor_purpleair_ranges.csv` removes full-history outdoor
+sensors before pairing and masks only the specified hours for bounded ranges.
 It then computes simultaneous one-hour changes at exact consecutive UTC hours.
 Each pair needs at least 168 movement observations. The primary statistic is
 Pearson correlation after separate 1%/99% winsorization of indoor and outdoor
@@ -27,6 +31,8 @@ Run from the repository root with its virtual environment:
   --indoor-history ".\data\purple air\school_indoor_pm25.csv" `
   --outdoor-history ".\data\purple air\outdoor_school\school_outdoor_pm25.csv" `
   --outdoor-history ".\data\purple air\outdoor_non_school\non_school_outdoor_pm25.csv" `
+  --excluded-indoor-ranges .\excluded_indoor_purpleair_ranges.csv `
+  --excluded-outdoor-ranges .\excluded_outdoor_purpleair_ranges.csv `
   --distance-limits 100 250 500 1000 `
   --output-dir .\pair_movement_correlation\results
 ```

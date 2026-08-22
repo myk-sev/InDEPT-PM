@@ -13,13 +13,31 @@ from pathlib import Path
 import numpy as np
 
 from purpleair_pair_exclusions.detect_pair_exclusions import (
+    read_excluded_sensor_ids,
     read_fema_school_ids,
     read_histories,
     read_reusable_school_pairs,
 )
+from purpleair_pair_exclusions.outdoor_quality import (
+    OutdoorExclusion,
+    exclude_outdoor_readings,
+    read_indoor_exclusions,
+    read_outdoor_exclusions,
+)
 
 
 HOUR = 3600
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_INDOOR_EXCLUSIONS = (
+    REPOSITORY_ROOT / "permanently_excluded_indoor_sensors.csv",
+    REPOSITORY_ROOT / "excluded_indoor_sensors_pm25_gt1000.csv",
+    REPOSITORY_ROOT
+    / "school_indoor_pm25"
+    / "data"
+    / "excluded_indoor_schools_pm25_gt1000.csv",
+)
+DEFAULT_OUTDOOR_EXCLUSIONS = REPOSITORY_ROOT / "excluded_outdoor_purpleair_ranges.csv"
+DEFAULT_INDOOR_RANGE_EXCLUSIONS = REPOSITORY_ROOT / "excluded_indoor_purpleair_ranges.csv"
 PAIR_FIELDS = (
     "indoor_sensor_id",
     "indoor_name",
@@ -85,6 +103,16 @@ def ranks(values: np.ndarray) -> np.ndarray:
 def winsorize(values: np.ndarray, percent: float) -> np.ndarray:
     low, high = np.percentile(values, (percent, 100 - percent))
     return np.clip(values, low, high)
+
+
+def fully_excluded_outdoor_ids(
+    exclusions: tuple[OutdoorExclusion, ...],
+) -> set[int]:
+    return {
+        item.sensor_id
+        for item in exclusions
+        if item.start is None and item.end is None
+    }
 
 
 def movements(
@@ -295,6 +323,8 @@ def write_report(
         "",
         "Each validated indoor school is paired independently with its nearest active-snapshot outdoor PurpleAir sensor; an outdoor sensor may be reused. The distance cohorts are cumulative. Pair selection is spatial only, so missing histories never cause substitution of a farther sensor.",
         "",
+        "Known-bad indoor sensors are removed before pairing; bounded indoor exclusions remove only readings in their half-open UTC ranges. Outdoor sensors with a full-history exclusion are removed before nearest-sensor selection; bounded outdoor exclusions remove only affected readings.",
+        "",
         "Histories are joined at exact UTC hours without interpolation. Movement is the one-hour first difference, `PM2.5(t) - PM2.5(t-1)`, and an observation is retained only when both sensors have both consecutive hours. A pair needs at least "
         f"{summary['methodology']['minimum_movements']} movements.",
         "",
@@ -328,6 +358,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--sensor-inventory", type=Path, required=True)
     result.add_argument("--indoor-history", type=Path, action="append", required=True)
     result.add_argument("--outdoor-history", type=Path, action="append", required=True)
+    result.add_argument("--excluded-indoor-sensors", type=Path, action="append")
+    result.add_argument(
+        "--excluded-indoor-ranges",
+        type=Path,
+        default=DEFAULT_INDOOR_RANGE_EXCLUSIONS,
+    )
+    result.add_argument(
+        "--excluded-outdoor-ranges",
+        type=Path,
+        default=DEFAULT_OUTDOOR_EXCLUSIONS,
+    )
     result.add_argument("--output-dir", type=Path, required=True)
     result.add_argument(
         "--distance-limits", type=float, nargs="+", default=(100, 250, 500, 1000)
@@ -353,12 +394,32 @@ def main() -> None:
     ):
         raise SystemExit("invalid distance, movement, winsor, lag, or bootstrap option")
 
+    exclusion_paths = tuple(
+        dict.fromkeys([*DEFAULT_INDOOR_EXCLUSIONS, *(args.excluded_indoor_sensors or [])])
+    )
+    excluded_indoor_ids = set().union(
+        *(read_excluded_sensor_ids(path) for path in exclusion_paths)
+    )
+    indoor_exclusions = read_indoor_exclusions(args.excluded_indoor_ranges)
+    outdoor_exclusions = read_outdoor_exclusions(args.excluded_outdoor_ranges)
+    excluded_outdoor_ids = fully_excluded_outdoor_ids(outdoor_exclusions)
     school_ids = read_fema_school_ids(args.school_sensors)
-    pairs = read_reusable_school_pairs(args.sensor_inventory, school_ids, limits[-1])
+    pairs = read_reusable_school_pairs(
+        args.sensor_inventory,
+        school_ids - excluded_indoor_ids,
+        limits[-1],
+        excluded_outdoor_ids,
+    )
     indoor_ids = {int(pair["indoor_sensor_id"]) for pair in pairs}
     outdoor_ids = {int(pair["outdoor_sensor_id"]) for pair in pairs}
     indoor = read_histories(args.indoor_history, indoor_ids)
+    indoor, excluded_indoor_hours = exclude_outdoor_readings(
+        indoor, indoor_exclusions
+    )
     outdoor = read_histories(args.outdoor_history, outdoor_ids)
+    outdoor, excluded_outdoor_hours = exclude_outdoor_readings(
+        outdoor, outdoor_exclusions
+    )
     metrics = [
         pair_metrics(
             pair,
@@ -385,11 +446,20 @@ def main() -> None:
         args.sensor_inventory,
         *args.indoor_history,
         *args.outdoor_history,
+        *exclusion_paths,
+        args.excluded_indoor_ranges,
+        args.excluded_outdoor_ranges,
     ]
     summary = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "cohort": "validated FEMA/NSD indoor schools",
         "school_sensor_count": len(school_ids),
+        "excluded_indoor_sensor_count": len(school_ids & excluded_indoor_ids),
+        "indoor_exclusion_range_count": len(indoor_exclusions),
+        "excluded_indoor_history_hours": excluded_indoor_hours,
+        "full_history_excluded_outdoor_sensor_count": len(excluded_outdoor_ids),
+        "outdoor_exclusion_range_count": len(outdoor_exclusions),
+        "excluded_outdoor_history_hours": excluded_outdoor_hours,
         "methodology": {
             "movement": "one-hour first difference at exact consecutive UTC hours",
             "primary_pair_metric": "Pearson r after pairwise 1%/99% winsorization",
