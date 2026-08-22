@@ -30,19 +30,21 @@ def _timestamp(text: str) -> int | None:
     return int(parsed.timestamp())
 
 
-def read_outdoor_exclusions(path: Path) -> tuple[OutdoorExclusion, ...]:
+def _read_exclusions(
+    path: Path, sensor_column: str
+) -> tuple[OutdoorExclusion, ...]:
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        required = {"outdoor_sensor_id", "start_utc", "end_utc", "reason"}
+        required = {sensor_column, "start_utc", "end_utc", "reason"}
         missing = required - set(reader.fieldnames or ())
         if missing:
             raise ValueError(
-                f"missing outdoor exclusion columns: {', '.join(sorted(missing))}"
+                f"missing exclusion columns: {', '.join(sorted(missing))}"
             )
         ranges = []
         for number, row in enumerate(reader, 2):
             try:
-                sensor_id = int(row["outdoor_sensor_id"])
+                sensor_id = int(row[sensor_column])
                 start, end = _timestamp(row["start_utc"]), _timestamp(row["end_utc"])
                 if sensor_id < 1 or start is not None and end is not None and start >= end:
                     raise ValueError
@@ -52,6 +54,14 @@ def read_outdoor_exclusions(path: Path) -> tuple[OutdoorExclusion, ...]:
     if not ranges:
         raise ValueError("outdoor exclusion CSV contains no ranges")
     return tuple(ranges)
+
+
+def read_outdoor_exclusions(path: Path) -> tuple[OutdoorExclusion, ...]:
+    return _read_exclusions(path, "outdoor_sensor_id")
+
+
+def read_indoor_exclusions(path: Path) -> tuple[OutdoorExclusion, ...]:
+    return _read_exclusions(path, "indoor_sensor_id")
 
 
 def exclude_outdoor_readings(
