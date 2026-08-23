@@ -1,8 +1,10 @@
 # Outdoor PurpleAir failure-period detector
 
 `detect_outdoor_quality_periods.py` is a review tool for identifying periods
-that resemble confirmed outdoor PurpleAir sensor failures. It uses only paired
-indoor/outdoor PurpleAir `pm2.5_atm`; it does not use TEMPO or NAQFC.
+that resemble confirmed outdoor PurpleAir sensor failures. It uses paired
+indoor/outdoor PurpleAir `pm2.5_atm` for response testing and scans every
+downloaded outdoor PurpleAir history for recurring error levels. It does not
+use TEMPO or NAQFC.
 
 The tool reads raw outdoor histories before applying the reviewed ranges in
 `../excluded_outdoor_purpleair_ranges.csv`. Those ranges are validation labels,
@@ -27,11 +29,18 @@ For every indoor/outdoor PurpleAir pair, the tool:
 5. Groups events by indoor/outdoor pair and UTC calendar year.
 6. Selects a sensor-year for review only after at least three low-response events
    and a low-response rate of at least 55%.
-7. Independently imports the recurring error-level detector. A sensor-year is
-   also selected when that detector finds a qualifying period, even when the
-   paired-response event count is too small.
+7. Independently imports the recurring error-level detector and runs it across
+   every downloaded outdoor history, including sensors absent from the current
+   pair file.
+8. Marks one event as an extreme mismatch when outdoor rise is at least 700
+   µg/m³, peak response ratio is at most 0.05, area response ratio is at most
+   0.10, and paired coverage is at least 80%. This rule has no absolute indoor
+   rise veto and does not require repeated events.
 
-These recall-first thresholds generate review candidates only. They are
+The recurring error-level and extreme-mismatch rules generate concrete range
+candidates. Repeated low response by itself remains review-only and is never
+written as an exclusion-range candidate. All outputs still require review and
+do not edit the authoritative manifest. The recall-first thresholds are
 intentionally broader than the indoor-sensor exclusion rule, which retains its
 5 µg/m³ absolute-rise gate. Candidate rows never modify training exclusions;
 they require manual review before addition to the exclusion manifest.
@@ -74,14 +83,20 @@ The default output directory is `purpleair_pair_exclusions/outdoor_quality_resul
 
 - `event_scores.csv`: every raw elevated-outdoor event and its paired response
   metrics. `selected_for_period_review` is the recall-first proportional flag;
-  `selected_for_exclusion` retains the stricter absolute-and-proportional flag.
+  `selected_for_exclusion` retains the stricter absolute-and-proportional flag;
+  `selected_for_error_exclusion` is the magnitude-and-ratio rule.
 - `period_scores.csv`: every analyzable pair-year, including periods below the
   repeated-event threshold.
 - `candidate_periods.csv`: threshold-passing known and new periods.
 - `new_candidate_periods.csv`: only threshold-passing periods not already in
   the reviewed manifest.
-- `error_level_periods.csv`: standalone error-level intervals with their
-  outdoor sensor IDs, UTC bounds, reading counts, and observed PM2.5 range.
+- `error_level_periods.csv`: standalone error-level intervals from all
+  downloaded outdoor histories, with sensor IDs, UTC bounds, reading counts,
+  and observed PM2.5 range.
+- `exclusion_range_candidates.csv`: merged recurring error-level and extreme
+  mismatch ranges, including ranges already covered by the reviewed manifest.
+- `new_exclusion_range_candidates.csv`: only ranges not fully covered by the
+  reviewed manifest. Low-response-only candidates are deliberately absent.
 - `summary.json`: inputs, event and period thresholds, known-period recovery,
   and candidate counts.
 - `outdoor_quality_period_summary.png`: event count versus low-response rate,

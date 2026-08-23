@@ -14,6 +14,7 @@ class OutdoorExclusion:
     start: int | None
     end: int | None
     reason: str
+    sensor_name: str = ""
 
     def contains(self, timestamp: int) -> bool:
         return (self.start is None or timestamp >= self.start) and (
@@ -50,7 +51,15 @@ def _read_exclusions(
                     raise ValueError
             except (TypeError, ValueError) as error:
                 raise ValueError(f"invalid outdoor exclusion row {number}") from error
-            ranges.append(OutdoorExclusion(sensor_id, start, end, row["reason"]))
+            ranges.append(
+                OutdoorExclusion(
+                    sensor_id,
+                    start,
+                    end,
+                    row["reason"],
+                    row.get("outdoor_name") or row.get("indoor_name") or "",
+                )
+            )
     if not ranges:
         raise ValueError("outdoor exclusion CSV contains no ranges")
     return tuple(ranges)

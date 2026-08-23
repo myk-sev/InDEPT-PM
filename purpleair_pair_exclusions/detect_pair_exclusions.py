@@ -18,7 +18,14 @@ from purpleair_pair_exclusions.location_history_explorer import (
 )
 from purpleair_pair_exclusions.outdoor_quality import (
     exclude_outdoor_readings,
+    read_indoor_exclusions,
     read_outdoor_exclusions,
+)
+from purpleair_pair_exclusions.training_intervals import (
+    build_training_intervals,
+    read_ranked_candidates,
+    source_record,
+    write_training_contract,
 )
 
 
@@ -92,6 +99,17 @@ SENSOR_FIELDS = (
 )
 PERMANENT_EXCLUSIONS_PATH = (
     Path(__file__).resolve().parent.parent / "permanently_excluded_indoor_sensors.csv"
+)
+INDOOR_EXCLUSION_PATHS = (
+    PERMANENT_EXCLUSIONS_PATH,
+    Path(__file__).resolve().parent.parent / "excluded_indoor_sensors_pm25_gt1000.csv",
+    Path(__file__).resolve().parent.parent
+    / "school_indoor_pm25"
+    / "data"
+    / "excluded_indoor_schools_pm25_gt1000.csv",
+)
+INDOOR_RANGE_EXCLUSIONS_PATH = (
+    Path(__file__).resolve().parent.parent / "excluded_indoor_purpleair_ranges.csv"
 )
 OUTDOOR_EXCLUSIONS_PATH = (
     Path(__file__).resolve().parent.parent / "excluded_outdoor_purpleair_ranges.csv"
@@ -241,6 +259,43 @@ def read_excluded_sensor_ids(path: Path) -> set[int]:
     return sensor_ids
 
 
+def read_permanent_exclusions(path: Path) -> list[dict[str, object]]:
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        required = {"sensor_id", "sensor_name", "reason"}
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"missing permanent exclusion columns: {', '.join(sorted(missing))}"
+            )
+        rows, seen = [], set()
+        for number, row in enumerate(reader, 2):
+            try:
+                sensor_id = int(row["sensor_id"])
+                name, reason = row["sensor_name"].strip(), row["reason"].strip()
+                if sensor_id < 1 or sensor_id in seen or not name or not reason:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid permanent exclusion row {number}"
+                ) from error
+            seen.add(sensor_id)
+            rows.append(
+                {"sensor_id": sensor_id, "sensor_name": name, "reason": reason}
+            )
+    if not rows:
+        raise ValueError("permanent exclusion CSV contains no rows")
+    return rows
+
+
+def read_sensor_names(path: Path) -> dict[int, str]:
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        if not {"sensor_index", "name"} <= set(reader.fieldnames or ()):
+            raise ValueError("sensor inventory is missing sensor_index or name")
+        return {int(row["sensor_index"]): row["name"] for row in reader}
+
+
 def distance_meters(first: dict[str, object], second: dict[str, object]) -> float:
     latitude_1, latitude_2 = map(
         math.radians, (float(first["latitude"]), float(second["latitude"]))
@@ -259,8 +314,12 @@ def distance_meters(first: dict[str, object], second: dict[str, object]) -> floa
 
 
 def read_reusable_school_pairs(
-    path: Path, school_ids: set[int], maximum_distance: float
+    path: Path,
+    school_ids: set[int],
+    maximum_distance: float,
+    excluded_outdoor_ids: set[int] | None = None,
 ) -> list[dict[str, object]]:
+    excluded_outdoor_ids = excluded_outdoor_ids or set()
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
         missing = set(SENSOR_COLUMNS) - set(reader.fieldnames or ())
@@ -278,7 +337,10 @@ def read_reusable_school_pairs(
                 }
             except (TypeError, ValueError) as error:
                 raise ValueError(f"invalid sensor inventory row {number}") from error
-            if sensor["location_type"] == "outside":
+            if (
+                sensor["location_type"] == "outside"
+                and sensor["sensor_index"] not in excluded_outdoor_ids
+            ):
                 outdoors.append(sensor)
             elif sensor["sensor_index"] in school_ids:
                 schools[int(sensor["sensor_index"])] = sensor
@@ -324,7 +386,7 @@ def select_pairs(
                 "cohort_sources": sources,
                 "outdoor_sensor_id": pair["outdoor_sensor_id"] if pair else "",
                 "selection_status": (
-                    "permanently_excluded_broken_sensor"
+                    "permanently_excluded_indoor_sensor"
                     if excluded
                     else "selected_outdoor_purpleair_pair"
                     if pair
@@ -339,7 +401,9 @@ def select_pairs(
     return selected, audit
 
 
-def history_files(paths: list[Path], requested_sensors: set[int]) -> list[Path]:
+def history_files(
+    paths: list[Path], requested_sensors: set[int] | None
+) -> list[Path]:
     files = []
     for path in paths:
         if path.is_file():
@@ -347,7 +411,9 @@ def history_files(paths: list[Path], requested_sensors: set[int]) -> list[Path]:
         elif path.is_dir():
             for file in path.rglob("*.csv"):
                 prefix = file.stem.split("_", 1)[0]
-                if prefix.isdigit() and int(prefix) in requested_sensors:
+                if prefix.isdigit() and (
+                    requested_sensors is None or int(prefix) in requested_sensors
+                ):
                     files.append(file)
         else:
             raise FileNotFoundError(f"PurpleAir history path not found: {path}")
@@ -355,11 +421,11 @@ def history_files(paths: list[Path], requested_sensors: set[int]) -> list[Path]:
 
 
 def read_histories(
-    paths: list[Path], requested_sensors: set[int]
+    paths: list[Path], requested_sensors: set[int] | None = None
 ) -> dict[int, dict[int, float]]:
-    values: dict[int, dict[int, float]] = {
-        sensor: {} for sensor in requested_sensors
-    }
+    values: dict[int, dict[int, float]] = (
+        {} if requested_sensors is None else {sensor: {} for sensor in requested_sensors}
+    )
     for path in history_files(paths, requested_sensors):
         with path.open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
@@ -371,7 +437,7 @@ def read_histories(
             for number, row in enumerate(reader, 2):
                 try:
                     sensor = int(row["sensor_index"])
-                    if sensor not in requested_sensors:
+                    if requested_sensors is not None and sensor not in requested_sensors:
                         continue
                     timestamp = int(row["time_stamp"])
                     text = (row["pm2.5_atm"] or "").strip().lower()
@@ -382,12 +448,13 @@ def read_histories(
                         raise ValueError
                 except (TypeError, ValueError) as error:
                     raise ValueError(f"invalid PurpleAir row {number} in {path}") from error
-                previous = values[sensor].get(timestamp)
+                sensor_values = values.setdefault(sensor, {})
+                previous = sensor_values.get(timestamp)
                 if previous is not None and not math.isclose(
                     previous, value, abs_tol=1e-6
                 ):
                     raise ValueError(f"conflicting duplicate sensor-hour in {path}")
-                values[sensor][timestamp] = value
+                sensor_values[timestamp] = value
     return values
 
 
@@ -750,6 +817,8 @@ def write_outputs(
     criteria: Criteria,
     inputs: dict[str, object] | None = None,
     cohort_selection: list[dict[str, object]] | None = None,
+    review_outdoor_ids: set[int] | None = None,
+    review_indoor_ids: set[int] | None = None,
 ) -> dict[str, object]:
     output.mkdir(parents=True, exist_ok=True)
     sensors = sensor_rows(events, criteria)
@@ -775,6 +844,19 @@ def write_outputs(
             output / "cohort_selection.csv",
             COHORT_SELECTION_FIELDS,
             cohort_selection,
+        )
+    if review_outdoor_ids is not None:
+        review_candidates = [
+            row
+            for row in excluded_sensors
+            if int(row["outdoor_sensor_id"]) in review_outdoor_ids
+            or int(row["sensor_id"]) in (review_indoor_ids or set())
+        ]
+        summary["k12_1km_indoor_exclusion_candidates"] = len(review_candidates)
+        write_csv(
+            output / "k12_1km_indoor_exclusion_candidates.csv",
+            SENSOR_FIELDS,
+            review_candidates,
         )
     write_csv(output / "selected_pairs.csv", SELECTED_PAIR_FIELDS, coverage)
     write_csv(output / "pair_coverage.csv", COVERAGE_FIELDS, coverage)
@@ -832,9 +914,21 @@ def parser() -> argparse.ArgumentParser:
         default=Path("../purple-air-pull/purpleair_continental_us_sensors.csv"),
         help="active PurpleAir inventory used to pair each school independently",
     )
-    result.add_argument("--school-pair-distance", type=float, default=100.0)
+    result.add_argument("--school-pair-distance", type=float, default=1000.0)
     result.add_argument("--indoor-history", type=Path, action="append", required=True)
+    result.add_argument(
+        "--review-indoor-history",
+        type=Path,
+        action="append",
+        help="1 km indoor history source to analyze and show on the review tab",
+    )
     result.add_argument("--outdoor-history", type=Path, action="append", required=True)
+    result.add_argument(
+        "--review-outdoor-history",
+        type=Path,
+        action="append",
+        help="isolated 1 km outdoor archive to analyze and show on its own explorer tab",
+    )
     result.add_argument(
         "--include-downloaded-pairs",
         action="store_true",
@@ -859,26 +953,72 @@ def main() -> None:
     snapshot_pairs = read_pairs(args.pairs)
     overlap_ids = read_overlap_indoor_ids(args.school_smoke_overlap)
     fema_ids = read_fema_school_ids(args.fema_school_sensors)
-    permanent_exclusions = read_excluded_sensor_ids(PERMANENT_EXCLUSIONS_PATH)
+    permanent_exclusion_rows = read_permanent_exclusions(PERMANENT_EXCLUSIONS_PATH)
+    permanent_exclusions = set().union(
+        *(read_excluded_sensor_ids(path) for path in INDOOR_EXCLUSION_PATHS)
+    )
+    names = read_sensor_names(args.sensor_inventory)
+    permanent_ids = {int(row["sensor_id"]) for row in permanent_exclusion_rows}
+    permanent_exclusion_rows.extend(
+        {
+            "sensor_id": sensor_id,
+            "sensor_name": names.get(sensor_id, f"Sensor {sensor_id}"),
+            "reason": "whole-sensor exclusion: PM2.5 readings above 1,000 ug/m3",
+        }
+        for sensor_id in sorted(permanent_exclusions - permanent_ids)
+    )
+    indoor_exclusions = read_indoor_exclusions(INDOOR_RANGE_EXCLUSIONS_PATH)
+    outdoor_exclusions = read_outdoor_exclusions(OUTDOOR_EXCLUSIONS_PATH)
+    reviewed_outdoor_ids = {item.sensor_id for item in outdoor_exclusions}
+    excluded_outdoor_ids = {
+        item.sensor_id
+        for item in outdoor_exclusions
+        if item.start is None and item.end is None
+    }
     school_ids = overlap_ids | fema_ids
     school_pairs = read_reusable_school_pairs(
         args.sensor_inventory,
         school_ids - permanent_exclusions,
         args.school_pair_distance,
+        excluded_outdoor_ids,
     )
-    all_pairs = [
+    non_school_pairs = [
         row
         for row in snapshot_pairs
         if int(row["indoor_sensor_id"]) not in school_ids
         and int(row["indoor_sensor_id"]) not in permanent_exclusions
-    ] + school_pairs
+    ]
+    excluded_snapshot_pairs = [
+        row
+        for row in non_school_pairs
+        if int(row["outdoor_sensor_id"]) in excluded_outdoor_ids
+    ]
+    replacement_pairs = read_reusable_school_pairs(
+        args.sensor_inventory,
+        {int(row["indoor_sensor_id"]) for row in excluded_snapshot_pairs},
+        args.school_pair_distance,
+        excluded_outdoor_ids,
+    )
+    all_pairs = [
+        row
+        for row in non_school_pairs
+        if int(row["outdoor_sensor_id"]) not in excluded_outdoor_ids
+    ] + replacement_pairs + school_pairs
     cohorts = {"smoke_overlap_school": overlap_ids, "fema_school": fema_ids}
+    review_indoor_paths = args.review_indoor_history or []
+    indoor_paths = [*args.indoor_history, *review_indoor_paths]
+    review_indoor_ids = (
+        set(read_histories(review_indoor_paths)) if review_indoor_paths else set()
+    )
     indoor = None
     downloaded_ids: set[int] = set()
     if args.include_downloaded_pairs:
         indoor = read_histories(
-            args.indoor_history,
-            {int(row["indoor_sensor_id"]) for row in all_pairs},
+            indoor_paths,
+            {
+                int(row["indoor_sensor_id"])
+                for row in all_pairs + excluded_snapshot_pairs
+            },
         )
         downloaded_ids = {sensor for sensor, values in indoor.items() if values}
         cohorts["downloaded_history"] = downloaded_ids
@@ -889,29 +1029,89 @@ def main() -> None:
     )
     if indoor is None:
         indoor = read_histories(
-            args.indoor_history, {int(row["indoor_sensor_id"]) for row in pairs}
+            indoor_paths, {int(row["indoor_sensor_id"]) for row in pairs}
         )
+    review_paths = args.review_outdoor_history or []
+    outdoor_paths = [*args.outdoor_history, *review_paths]
+    review_outdoor_ids = set(read_histories(review_paths)) if review_paths else set()
     outdoor = read_histories(
-        args.outdoor_history, {int(row["outdoor_sensor_id"]) for row in pairs}
+        outdoor_paths, {int(row["outdoor_sensor_id"]) for row in pairs}
     )
-    outdoor_exclusions = read_outdoor_exclusions(OUTDOOR_EXCLUSIONS_PATH)
+    explorer_outdoor = outdoor | read_histories(
+        outdoor_paths, reviewed_outdoor_ids
+    )
+    explorer_indoor = read_histories(indoor_paths)
+    training_candidates = read_ranked_candidates(
+        args.sensor_inventory,
+        school_ids - permanent_exclusions,
+        args.school_pair_distance,
+    )
+    training_intervals, unresolved_intervals = build_training_intervals(
+        training_candidates,
+        explorer_indoor,
+        {"smoke_overlap_school": overlap_ids, "fema_school": fema_ids},
+        permanent_exclusions,
+        indoor_exclusions,
+        outdoor_exclusions,
+    )
+    interval_metadata = write_training_contract(
+        args.output_dir,
+        training_intervals,
+        unresolved_intervals,
+        args.school_pair_distance,
+        {
+            "sensor_inventory": source_record(args.sensor_inventory),
+            "school_cohorts": [
+                source_record(args.school_smoke_overlap),
+                source_record(args.fema_school_sensors),
+            ],
+            "indoor_history": [source_record(path) for path in args.indoor_history],
+        },
+        [
+            source_record(path)
+            for path in (
+                *INDOOR_EXCLUSION_PATHS,
+                INDOOR_RANGE_EXCLUSIONS_PATH,
+                OUTDOOR_EXCLUSIONS_PATH,
+            )
+        ],
+        len(school_ids - permanent_exclusions),
+    )
+    paired_indoor_ids = {int(row["indoor_sensor_id"]) for row in all_pairs}
+    unpaired_sensor_ids = (
+        set(explorer_indoor) - paired_indoor_ids - permanent_exclusions
+    )
+    analysis_indoor, excluded_indoor_hours = exclude_outdoor_readings(
+        indoor, indoor_exclusions
+    )
     analysis_outdoor, excluded_outdoor_hours = exclude_outdoor_readings(
         outdoor, outdoor_exclusions
     )
-    events, coverage = analyze_pairs(pairs, indoor, analysis_outdoor, criteria)
+    events, coverage = analyze_pairs(
+        pairs, analysis_indoor, analysis_outdoor, criteria
+    )
     inputs = {
         "purpleair_pair_snapshot": str(args.pairs.resolve()),
         "school_smoke_overlap": str(args.school_smoke_overlap.resolve()),
         "fema_school_sensors": str(args.fema_school_sensors.resolve()),
         "purpleair_pair_snapshot_count": len(snapshot_pairs),
         "sensor_inventory": str(args.sensor_inventory.resolve()),
-        "permanent_exclusions": str(PERMANENT_EXCLUSIONS_PATH.resolve()),
+        "indoor_whole_sensor_exclusions": [
+            str(path.resolve()) for path in INDOOR_EXCLUSION_PATHS
+        ],
         "permanently_excluded_indoor_sensors": len(permanent_exclusions),
+        "indoor_range_exclusions": str(INDOOR_RANGE_EXCLUSIONS_PATH.resolve()),
+        "indoor_exclusion_ranges": len(indoor_exclusions),
+        "excluded_indoor_hours": excluded_indoor_hours,
         "outdoor_exclusions": str(OUTDOOR_EXCLUSIONS_PATH.resolve()),
         "outdoor_exclusion_ranges": len(outdoor_exclusions),
+        "excluded_outdoor_sensors": len(excluded_outdoor_ids),
+        "reviewed_outdoor_sensors": len(reviewed_outdoor_ids),
+        "excluded_non_school_snapshot_pairs": len(excluded_snapshot_pairs),
+        "replacement_non_school_snapshot_pairs": len(replacement_pairs),
         "excluded_outdoor_hours": excluded_outdoor_hours,
         "excluded_candidate_sensors": sum(
-            row["selection_status"] == "permanently_excluded_broken_sensor"
+            row["selection_status"] == "permanently_excluded_indoor_sensor"
             for row in cohort_selection
         ),
         "school_pair_distance_meters": args.school_pair_distance,
@@ -948,13 +1148,48 @@ def main() -> None:
             for row in cohort_selection
         ),
         "indoor_history": [str(path.resolve()) for path in args.indoor_history],
+        "review_indoor_history": [
+            str(path.resolve()) for path in review_indoor_paths
+        ],
         "outdoor_history": [str(path.resolve()) for path in args.outdoor_history],
+        "review_outdoor_history": [str(path.resolve()) for path in review_paths],
+        "training_intervals": interval_metadata["counts"],
     }
     inputs["history_explorer_locations"] = write_location_history_explorer(
-        args.output_dir, pairs, indoor, outdoor, outdoor_exclusions
+        args.output_dir,
+        pairs,
+        explorer_indoor,
+        explorer_outdoor,
+        outdoor_exclusions,
+        unpaired_sensor_ids,
+        permanent_exclusion_rows,
+        indoor_exclusions,
+        fema_ids,
+        review_outdoor_ids=review_outdoor_ids,
+        review_indoor_ids=review_indoor_ids,
+    )
+    inputs["history_explorer_1km_review_indoor_sensors"] = len(review_indoor_ids)
+    inputs["history_explorer_1km_review_outdoor_sensors"] = len(review_outdoor_ids)
+    inputs["history_explorer_unpaired_sensors"] = len(unpaired_sensor_ids)
+    inputs["history_explorer_excluded_sensors"] = sum(
+        bool(explorer_indoor.get(int(row["sensor_id"])))
+        for row in permanent_exclusion_rows
+    ) + sum(
+        bool(explorer_indoor.get(sensor_id))
+        for sensor_id in {item.sensor_id for item in indoor_exclusions}
+    ) + sum(
+        bool(explorer_outdoor.get(sensor_id))
+        for sensor_id in reviewed_outdoor_ids
     )
     summary = write_outputs(
-        args.output_dir, events, coverage, criteria, inputs, cohort_selection
+        args.output_dir,
+        events,
+        coverage,
+        criteria,
+        inputs,
+        cohort_selection,
+        review_outdoor_ids,
+        review_indoor_ids,
     )
     print(" ".join(f"{key}={value}" for key, value in summary.items() if key != "criteria"))
     print(f"output={args.output_dir.resolve()}")
