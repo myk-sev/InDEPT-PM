@@ -113,9 +113,10 @@ Each run writes:
   showing the full label history, model-visible history, artificially masked
   labels, predictions, and natural missingness as gaps.
 
-The CSV is refreshed after every epoch. Both plots are refreshed from the best
-validation checkpoint after each completed masking stage, and their absolute
-paths are stored in the checkpoint JSON.
+The metrics CSV and loss graph are refreshed after every epoch. The unnumbered
+reconstruction plot is refreshed from the best validation checkpoint after
+each completed masking stage. Their absolute paths are stored in the checkpoint
+JSON.
 
 To refresh the reconstruction plot during a stage, set an epoch interval:
 

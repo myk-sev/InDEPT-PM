@@ -319,6 +319,7 @@ def train(args: argparse.Namespace) -> None:
                 f"outdoor_rmse={validation_metrics['outdoor_rmse']:.3f}"
             )
             write_metrics(diagnostics.metrics, metrics)
+            write_loss_curve(diagnostics.loss_curve, metrics)
             if (
                 args.reconstruction_every_epochs
                 and epoch % args.reconstruction_every_epochs == 0
@@ -341,7 +342,6 @@ def train(args: argparse.Namespace) -> None:
         model.load_state_dict(best_state)
         if stage not in completed:
             completed.append(stage)
-        write_loss_curve(diagnostics.loss_curve, metrics)
         write_reconstruction_examples(
             diagnostics.reconstructions,
             model,
