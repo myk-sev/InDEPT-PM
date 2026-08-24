@@ -126,9 +126,11 @@ To refresh the reconstruction plot during a stage, set an epoch interval:
 ```
 
 This uses the same fixed validation windows and mask pattern every time, making
-changes between epochs directly comparable. The interval resets at the start
-of each masking stage. The default `0` disables periodic reconstruction while
-retaining the best-checkpoint plot at the end of every stage.
+changes between epochs directly comparable. Each periodic image is retained as
+`<run>.<stage>.epoch_NNN.reconstruction_examples.png`. The interval resets at
+the start of each masking stage. The default `0` disables periodic snapshots;
+the unnumbered image remains the best-checkpoint plot from the latest completed
+stage.
 
 Resume a saved model for more epochs with `--resume`. Unless `--stages` is
 provided, training continues the masking stage recorded in the checkpoint.

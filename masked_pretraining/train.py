@@ -30,6 +30,7 @@ from .data import (
 )
 from .diagnostics import (
     diagnostic_paths,
+    reconstruction_snapshot_path,
     write_loss_curve,
     write_metrics,
     write_reconstruction_examples,
@@ -323,7 +324,9 @@ def train(args: argparse.Namespace) -> None:
                 and epoch % args.reconstruction_every_epochs == 0
             ):
                 write_reconstruction_examples(
-                    diagnostics.reconstructions,
+                    reconstruction_snapshot_path(
+                        diagnostics.reconstructions, stage, epoch
+                    ),
                     model,
                     validation_data,
                     stage,

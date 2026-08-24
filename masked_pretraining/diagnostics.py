@@ -57,6 +57,13 @@ def diagnostic_paths(checkpoint: Path) -> DiagnosticPaths:
     )
 
 
+def reconstruction_snapshot_path(path: Path, stage: str, epoch: int) -> Path:
+    run_name = path.name.removesuffix(".reconstruction_examples.png")
+    return path.with_name(
+        f"{run_name}.{stage}.epoch_{epoch:03d}.reconstruction_examples.png"
+    )
+
+
 def write_metrics(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
