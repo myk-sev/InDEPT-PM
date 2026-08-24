@@ -14,7 +14,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from data_loader import DualEncoderDataset, DualEncoderLoaders, create_data_loaders
+from data_loader import (
+    PERMANENT_EXCLUSIONS_PATH,
+    DualEncoderDataset,
+    DualEncoderLoaders,
+    SingularTrainingDataset,
+    create_data_loaders,
+    create_singular_data_loaders,
+)
 from pm25_models import (
     DEFAULT_MODEL,
     DualEncoderPatchTransformer,
@@ -192,7 +199,14 @@ def save_checkpoint(
     if training_state is not None:
         checkpoint["training_state"] = training_state
     torch.save(checkpoint, temporary)
-    temporary.replace(path)
+    for attempt in range(11):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 10:
+                raise
+            time.sleep(1)
 
 
 def output_filename(value: str) -> Path:
@@ -511,7 +525,59 @@ def build_loaders(
     return dataset, loaders
 
 
+def build_singular_loaders(
+    training_data: Path,
+    config: ModelConfig,
+    training_config: dict,
+    device: torch.device,
+) -> tuple[SingularTrainingDataset, DualEncoderLoaders]:
+    dataset = SingularTrainingDataset(
+        training_data,
+        history_hours=config.history_hours,
+        forecast_hours=config.prediction_hours,
+        cyclical_time=getattr(config, "cyclical_time", False),
+    )
+    loaders = create_singular_data_loaders(
+        dataset,
+        batch_size=training_config["batch_size"],
+        seed=training_config["seed"],
+        num_workers=training_config["num_workers"],
+        pin_memory=device.type in {"cuda", "xpu"},
+    )
+    return dataset, loaders
+
+
+def training_data_path(
+    args: argparse.Namespace, recorded: dict | None = None
+) -> Path | None:
+    legacy = (
+        args.pairs,
+        args.indoor_history,
+        args.outdoor_history,
+        args.forecast_root,
+    )
+    training_data = args.training_data
+    if training_data is None and not any(legacy) and recorded and recorded.get(
+        "training_data"
+    ):
+        training_data = Path(recorded["training_data"])
+    if training_data is not None:
+        if any(legacy) or args.balanced_training_index or args.excluded_sensors:
+            raise ValueError(
+                "--training-data cannot be combined with legacy data source, "
+                "balance, or exclusion arguments"
+            )
+        return training_data
+    if not all(legacy):
+        raise ValueError(
+            "provide --training-data or all of --pairs, --indoor-history, "
+            "--outdoor-history, and --forecast-root"
+        )
+    return None
+
+
 def train(args: argparse.Namespace) -> None:
+    training_data = training_data_path(args)
     config = build_config(args.model, vars(args))
     if args.epochs < 1 or args.batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
@@ -530,10 +596,6 @@ def train(args: argparse.Namespace) -> None:
     recovery_path = recovery_checkpoint_path(checkpoint_path)
     training_config = {
         "model": args.model,
-        "pairs": str(args.pairs.resolve()),
-        "indoor_history": [str(path.resolve()) for path in args.indoor_history],
-        "outdoor_history": str(args.outdoor_history.resolve()),
-        "forecast_root": str(args.forecast_root.resolve()),
         "batch_size": args.batch_size,
         "train_fraction": args.train_fraction,
         "validation_fraction": args.validation_fraction,
@@ -550,29 +612,52 @@ def train(args: argparse.Namespace) -> None:
         "device": args.device,
         "minimum_outdoor_history_hours": args.minimum_outdoor_history_hours,
     }
-    if args.balanced_training_index is not None:
+    if training_data is not None:
+        training_config["training_data"] = str(training_data.resolve())
+        training_config["training_data_sha256"] = file_sha256(training_data)
+    else:
+        training_config.update(
+            {
+                "pairs": str(args.pairs.resolve()),
+                "indoor_history": [
+                    str(path.resolve()) for path in args.indoor_history
+                ],
+                "outdoor_history": str(args.outdoor_history.resolve()),
+                "forecast_root": str(args.forecast_root.resolve()),
+                "permanent_excluded_sensors": str(PERMANENT_EXCLUSIONS_PATH),
+                "permanent_excluded_sensors_sha256": file_sha256(
+                    PERMANENT_EXCLUSIONS_PATH
+                ),
+            }
+        )
+    if training_data is None and args.balanced_training_index is not None:
         training_config["balanced_training_index"] = str(
             args.balanced_training_index.resolve()
         )
         training_config["balanced_training_index_sha256"] = file_sha256(
             args.balanced_training_index
         )
-    if args.excluded_sensors is not None:
+    if training_data is None and args.excluded_sensors is not None:
         training_config["excluded_sensors"] = str(args.excluded_sensors.resolve())
         training_config["excluded_sensors_sha256"] = file_sha256(
             args.excluded_sensors
         )
-    dataset, loaders = build_loaders(
-        args.pairs,
-        args.indoor_history,
-        args.outdoor_history,
-        args.forecast_root,
-        config,
-        training_config,
-        device,
-        args.balanced_training_index,
-        args.excluded_sensors,
-    )
+    if training_data is not None:
+        dataset, loaders = build_singular_loaders(
+            training_data, config, training_config, device
+        )
+    else:
+        dataset, loaders = build_loaders(
+            args.pairs,
+            args.indoor_history,
+            args.outdoor_history,
+            args.forecast_root,
+            config,
+            training_config,
+            device,
+            args.balanced_training_index,
+            args.excluded_sensors,
+        )
     if loaders.balance_report is not None:
         training_config["balance_report"] = loaders.balance_report
         report = loaders.balance_report
@@ -617,10 +702,10 @@ def train(args: argparse.Namespace) -> None:
         name: len(getattr(loaders, name).dataset)
         for name in ("train", "validation", "temporal_test", "location_test")
     }
-    print(
-        f"device={device} excluded_sensors={len(dataset.excluded_sensor_ids)} "
-        f"samples={counts}"
+    exclusions = "embedded_in_csv" if training_data is not None else len(
+        dataset.excluded_sensor_ids
     )
+    print(f"device={device} excluded_sensors={exclusions} samples={counts}")
     print(
         f"indoor z-score mean={zscores.indoor_mean:.6g} "
         f"std={zscores.indoor_std:.6g}; "
@@ -794,35 +879,57 @@ def infer(args: argparse.Namespace) -> None:
     training_config = dict(checkpoint["training_config"])
     training_config["batch_size"] = 1
     training_config["num_workers"] = 0
-    balanced_training_index = args.balanced_training_index
-    if balanced_training_index is None and training_config.get(
-        "balanced_training_index"
-    ):
-        balanced_training_index = Path(training_config["balanced_training_index"])
-    if balanced_training_index is not None:
-        expected = training_config.get("balanced_training_index_sha256")
-        actual = file_sha256(balanced_training_index)
-        if expected is not None and actual != expected:
-            raise ValueError("balanced training index does not match the checkpoint")
-    excluded_sensors = args.excluded_sensors
-    if excluded_sensors is None and training_config.get("excluded_sensors"):
-        excluded_sensors = Path(training_config["excluded_sensors"])
-    if excluded_sensors is not None:
-        expected = training_config.get("excluded_sensors_sha256")
-        actual = file_sha256(excluded_sensors)
-        if expected is not None and actual != expected:
-            raise ValueError("excluded sensor list does not match the checkpoint")
-    dataset, loaders = build_loaders(
-        args.pairs,
-        args.indoor_history,
-        args.outdoor_history,
-        args.forecast_root,
-        config,
-        training_config,
-        device,
-        balanced_training_index,
-        excluded_sensors,
-    )
+    training_data = training_data_path(args, training_config)
+    if training_data is not None:
+        expected = training_config.get("training_data_sha256")
+        if expected is not None and file_sha256(training_data) != expected:
+            raise ValueError("singular training CSV does not match the checkpoint")
+        dataset, loaders = build_singular_loaders(
+            training_data, config, training_config, device
+        )
+    else:
+        expected_permanent = training_config.get(
+            "permanent_excluded_sensors_sha256"
+        )
+        if expected_permanent is not None and file_sha256(
+            PERMANENT_EXCLUSIONS_PATH
+        ) != expected_permanent:
+            raise ValueError(
+                "permanent excluded sensor list does not match the checkpoint"
+            )
+        balanced_training_index = args.balanced_training_index
+        if balanced_training_index is None and training_config.get(
+            "balanced_training_index"
+        ):
+            balanced_training_index = Path(
+                training_config["balanced_training_index"]
+            )
+        if balanced_training_index is not None:
+            expected = training_config.get("balanced_training_index_sha256")
+            actual = file_sha256(balanced_training_index)
+            if expected is not None and actual != expected:
+                raise ValueError(
+                    "balanced training index does not match the checkpoint"
+                )
+        excluded_sensors = args.excluded_sensors
+        if excluded_sensors is None and training_config.get("excluded_sensors"):
+            excluded_sensors = Path(training_config["excluded_sensors"])
+        if excluded_sensors is not None:
+            expected = training_config.get("excluded_sensors_sha256")
+            actual = file_sha256(excluded_sensors)
+            if expected is not None and actual != expected:
+                raise ValueError("excluded sensor list does not match the checkpoint")
+        dataset, loaders = build_loaders(
+            args.pairs,
+            args.indoor_history,
+            args.outdoor_history,
+            args.forecast_root,
+            config,
+            training_config,
+            device,
+            balanced_training_index,
+            excluded_sensors,
+        )
     loader = {
         "train": loaders.train,
         "validation": loaders.validation,
@@ -928,12 +1035,19 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--model", choices=model_names(), default=DEFAULT_MODEL
     )
-    train_parser.add_argument("--pairs", type=Path, required=True)
     train_parser.add_argument(
-        "--indoor-history", type=Path, action="append", required=True
+        "--training-data",
+        "--training-csv",
+        dest="training_data",
+        type=Path,
+        help="singular CSV containing materialized windows and split labels",
     )
-    train_parser.add_argument("--outdoor-history", type=Path, required=True)
-    train_parser.add_argument("--forecast-root", type=Path, required=True)
+    train_parser.add_argument("--pairs", type=Path)
+    train_parser.add_argument(
+        "--indoor-history", type=Path, action="append"
+    )
+    train_parser.add_argument("--outdoor-history", type=Path)
+    train_parser.add_argument("--forecast-root", type=Path)
     train_parser.add_argument(
         "--balanced-training-index",
         type=Path,
@@ -993,12 +1107,19 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser = commands.add_parser(
         "infer", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    infer_parser.add_argument("--pairs", type=Path, required=True)
     infer_parser.add_argument(
-        "--indoor-history", type=Path, action="append", required=True
+        "--training-data",
+        "--training-csv",
+        dest="training_data",
+        type=Path,
+        help="singular CSV; defaults to the file recorded in the checkpoint",
     )
-    infer_parser.add_argument("--outdoor-history", type=Path, required=True)
-    infer_parser.add_argument("--forecast-root", type=Path, required=True)
+    infer_parser.add_argument("--pairs", type=Path)
+    infer_parser.add_argument(
+        "--indoor-history", type=Path, action="append"
+    )
+    infer_parser.add_argument("--outdoor-history", type=Path)
+    infer_parser.add_argument("--forecast-root", type=Path)
     infer_parser.add_argument(
         "--balanced-training-index",
         type=Path,

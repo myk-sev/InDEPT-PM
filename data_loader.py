@@ -33,6 +33,22 @@ FORECAST_COLUMNS = (
     "pm25_corrected_ug_m3",
 )
 REQUIRED_RECENT_OUTDOOR_HOURS = 3
+SINGULAR_SPLITS = ("train", "validation", "temporal_test", "location_test")
+LINEAR_TIME_FEATURES = ("hour", "weekday", "month", "day")
+CYCLICAL_TIME_FEATURES = (
+    "daily_sin",
+    "daily_cos",
+    "weekly_sin",
+    "weekly_cos",
+    "annual_sin",
+    "annual_cos",
+)
+PERMANENT_EXCLUSIONS_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "exclusions"
+    / "permanently_excluded_indoor_sensors.csv"
+)
 
 
 @dataclass(frozen=True)
@@ -80,11 +96,9 @@ class DualEncoderDataset(Dataset):
         self.forecast_hours = forecast_hours
         self.minimum_outdoor_history_hours = minimum_outdoor_history_hours
         all_pairs = _read_pairs(Path(pairs_path))
-        excluded = (
-            _read_excluded_sensors(Path(excluded_sensors_path))
-            if excluded_sensors_path is not None
-            else set()
-        )
+        excluded = _read_excluded_sensors(PERMANENT_EXCLUSIONS_PATH)
+        if excluded_sensors_path is not None:
+            excluded |= _read_excluded_sensors(Path(excluded_sensors_path))
         pairs = [pair for pair in all_pairs if pair[1] not in excluded]
         if not pairs:
             raise ValueError("excluded sensor list removes every pair")
@@ -171,6 +185,222 @@ class DualEncoderDataset(Dataset):
             "location_index": torch.tensor(location, dtype=torch.int64),
             "anchor_time_utc": self.timestamps[anchor],
         }
+
+
+class SingularTrainingDataset(Dataset):
+    """Materialized windows and authoritative splits from one training CSV."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        history_hours: int = 168,
+        forecast_hours: int = 36,
+        cyclical_time: bool = False,
+    ) -> None:
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"singular training CSV not found: {path}")
+        if history_hours < 1 or forecast_hours < 1:
+            raise ValueError("history_hours and forecast_hours must be positive")
+
+        time_features = (
+            CYCLICAL_TIME_FEATURES if cyclical_time else LINEAR_TIME_FEATURES
+        )
+        history_features = (
+            "tempo_pm25_ug_m3",
+            "indoor_pm25_ug_m3",
+            *time_features,
+        )
+        forecast_features = (
+            ("naqfc_pm25_ug_m3", *time_features)
+            if cyclical_time
+            else ("naqfc_pm25_ug_m3",)
+        )
+        history_columns = tuple(
+            f"history_{hour:03d}_{feature}"
+            for hour in range(history_hours)
+            for feature in history_features
+        )
+        forecast_columns = tuple(
+            f"forecast_{hour:03d}_{feature}"
+            for hour in range(1, forecast_hours + 1)
+            for feature in forecast_features
+        )
+        target_columns = tuple(
+            f"target_{hour:03d}_indoor_pm25_ug_m3"
+            for hour in range(1, forecast_hours + 1)
+        )
+        metadata_columns = (
+            "sample_index",
+            "split",
+            "location_id",
+            "sensor_id",
+            "model_name",
+            "history_hours",
+            "prediction_hours",
+            "anchor_time_utc",
+        )
+        required = metadata_columns + history_columns + forecast_columns + target_columns
+        with path.open(encoding="utf-8-sig", newline="") as source:
+            fieldnames = next(csv.reader(source), None)
+        _require_csv_columns(fieldnames, required, path)
+
+        column_types = {column: pa.float32() for column in required}
+        column_types.update(
+            {
+                "sample_index": pa.int64(),
+                "split": pa.string(),
+                "location_id": pa.string(),
+                "sensor_id": pa.int64(),
+                "model_name": pa.string(),
+                "history_hours": pa.int32(),
+                "prediction_hours": pa.int32(),
+                "anchor_time_utc": pa.string(),
+            }
+        )
+        try:
+            table = pacsv.read_csv(
+                path,
+                convert_options=pacsv.ConvertOptions(
+                    include_columns=list(required), column_types=column_types
+                ),
+            ).combine_chunks()
+        except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
+            raise ValueError(f"invalid singular training CSV {path}: {error}") from error
+        if not len(table):
+            raise ValueError(f"singular training CSV contains no rows: {path}")
+
+        stored_history_hours = table["history_hours"].to_numpy()
+        stored_forecast_hours = table["prediction_hours"].to_numpy()
+        if np.any(stored_history_hours != history_hours):
+            raise ValueError(
+                f"singular training CSV history_hours does not match {history_hours}"
+            )
+        if np.any(stored_forecast_hours != forecast_hours):
+            raise ValueError(
+                f"singular training CSV prediction_hours does not match {forecast_hours}"
+            )
+
+        histories = np.column_stack(
+            [table[column].to_numpy(zero_copy_only=False) for column in history_columns]
+        ).reshape(len(table), history_hours, len(history_features))
+        forecasts = np.column_stack(
+            [table[column].to_numpy(zero_copy_only=False) for column in forecast_columns]
+        ).reshape(len(table), forecast_hours, len(forecast_features))
+        targets = np.column_stack(
+            [table[column].to_numpy(zero_copy_only=False) for column in target_columns]
+        )
+        if (
+            np.isinf(histories[..., 0]).any()
+            or np.any(histories[..., 0][np.isfinite(histories[..., 0])] < 0)
+            or not np.isfinite(histories[..., 1:]).all()
+            or not np.isfinite(forecasts).all()
+            or not np.isfinite(targets).all()
+            or np.any(histories[..., 1] < 0)
+            or np.any(targets < 0)
+        ):
+            raise ValueError(f"singular training CSV contains invalid model values: {path}")
+
+        sample_ids = table["sample_index"].to_numpy()
+        if len(np.unique(sample_ids)) != len(sample_ids):
+            raise ValueError(f"singular training CSV has duplicate sample_index values: {path}")
+        splits = table["split"].to_pylist()
+        if any(split not in SINGULAR_SPLITS for split in splits):
+            raise ValueError(f"singular training CSV contains an invalid split: {path}")
+        self.split_indices = {
+            split: np.flatnonzero(np.asarray(splits) == split)
+            for split in SINGULAR_SPLITS
+        }
+        if any(not len(indices) for indices in self.split_indices.values()):
+            raise ValueError(f"singular training CSV contains an empty split: {path}")
+
+        locations = table["location_id"].to_pylist()
+        sensors = table["sensor_id"].to_numpy()
+        location_lookup: dict[str, int] = {}
+        sensor_by_location: dict[str, int] = {}
+        sensor_locations: dict[int, str] = {}
+        location_indices = []
+        for location, sensor in zip(locations, sensors):
+            sensor = int(sensor)
+            if not location or sensor < 1:
+                raise ValueError(f"singular training CSV has invalid sensor identity: {path}")
+            if location in sensor_by_location and sensor_by_location[location] != sensor:
+                raise ValueError(
+                    "singular training CSV maps one location to multiple sensors: "
+                    f"{path}"
+                )
+            if sensor in sensor_locations and sensor_locations[sensor] != location:
+                raise ValueError(
+                    "singular training CSV maps one sensor to multiple locations: "
+                    f"{path}"
+                )
+            sensor_by_location[location] = sensor
+            sensor_locations[sensor] = location
+            location_indices.append(location_lookup.setdefault(location, len(location_lookup)))
+
+        anchor_times = np.array(
+            [_utc_hour(value, path) for value in table["anchor_time_utc"].to_pylist()],
+            dtype=np.int64,
+        )
+        if len(set(zip(locations, anchor_times.tolist()))) != len(anchor_times):
+            raise ValueError(f"singular training CSV has duplicate sensor-hour windows: {path}")
+        model_names = set(table["model_name"].to_pylist())
+        if len(model_names) != 1 or not next(iter(model_names)):
+            raise ValueError(f"singular training CSV has inconsistent model_name values: {path}")
+
+        self.path = path
+        self.history_hours = history_hours
+        self.forecast_hours = forecast_hours
+        self.cyclical_time = cyclical_time
+        self.source_model_name = next(iter(model_names))
+        self.location_ids = tuple(location_lookup)
+        self.sensor_ids = tuple(sensor_by_location[location] for location in self.location_ids)
+        self.excluded_sensor_ids: tuple[int, ...] = ()
+        self.histories = torch.from_numpy(histories)
+        self.forecasts = torch.from_numpy(forecasts)
+        self.targets = torch.from_numpy(targets)
+        self.location_indices = torch.tensor(location_indices, dtype=torch.int64)
+        self.anchor_times = torch.from_numpy(anchor_times)
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {
+            "history": self.histories[index],
+            "forecast": self.forecasts[index],
+            "target": self.targets[index],
+            "location_index": self.location_indices[index],
+            "anchor_time_utc": self.anchor_times[index],
+        }
+
+
+def create_singular_data_loaders(
+    dataset: SingularTrainingDataset,
+    batch_size: int = 64,
+    seed: int = 42,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+) -> DualEncoderLoaders:
+    """Create loaders from the split labels stored in the singular CSV."""
+    if batch_size < 1 or num_workers < 0:
+        raise ValueError("batch_size must be positive and num_workers cannot be negative")
+    common = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+    }
+    generator = torch.Generator().manual_seed(seed)
+    loader = lambda split, **options: DataLoader(
+        Subset(dataset, dataset.split_indices[split]), **common, **options
+    )
+    return DualEncoderLoaders(
+        train=loader("train", shuffle=True, generator=generator),
+        validation=loader("validation"),
+        temporal_test=loader("temporal_test"),
+        location_test=loader("location_test"),
+    )
 
 
 def create_data_loaders(
@@ -362,6 +592,23 @@ def _paths(value: str | Path | Iterable[str | Path]) -> list[Path]:
     if not paths:
         raise ValueError("at least one indoor history path is required")
     return paths
+
+
+def _utc_hour(value: str, path: Path) -> int:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if (
+            timestamp.tzinfo is None
+            or timestamp.utcoffset() is None
+            or timestamp.utcoffset().total_seconds() != 0
+        ):
+            raise ValueError
+        seconds = int(timestamp.timestamp())
+        if seconds % 3600:
+            raise ValueError
+        return seconds
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid anchor_time_utc in {path}") from error
 
 
 def _read_pairs(path: Path) -> list[tuple[str, int, float, float]]:
