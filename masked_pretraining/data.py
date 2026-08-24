@@ -34,7 +34,11 @@ RESPONSIVENESS_COLUMNS = (
     "outdoor_sensor_id",
     "responsiveness_tier",
 )
-SCHOOL_COHORT_SOURCES = {"fema_school", "smoke_overlap_school"}
+TRAINING_COHORT_SOURCES = {
+    "downloaded_history",
+    "fema_school",
+    "smoke_overlap_school",
+}
 
 
 @dataclass(frozen=True)
@@ -215,7 +219,7 @@ def load_training_intervals(
                     or distance < 0
                     or not math.isfinite(distance)
                     or start >= end
-                    or not set(sources.split(";")) & SCHOOL_COHORT_SOURCES
+                    or not set(sources.split(";")) & TRAINING_COHORT_SOURCES
                     or row["selection_reason"].strip() != expected_reason
                 ):
                     raise ValueError

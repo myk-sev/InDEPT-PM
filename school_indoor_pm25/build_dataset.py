@@ -33,7 +33,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=repo / "school_indoor_pm25/data",
+        default=repo / "data" / "purple air",
     )
     return parser.parse_args()
 
@@ -166,7 +166,7 @@ def main() -> None:
             raise ValueError("history downloads do not cover all 119 cohort sensors")
         summaries.append(read_collection(name, files, cohort, values))
 
-    dataset = output_dir / "purpleair_school_indoor_pm25.csv"
+    dataset = output_dir / "school_indoor_pm25.csv"
     write_dataset(dataset, values)
     rows_by_sensor = Counter(sensor for sensor, _ in values)
     timestamps = [int(timestamp) for _, timestamp in values]

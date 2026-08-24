@@ -432,6 +432,7 @@ def build(args: argparse.Namespace) -> dict[str, object]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    repo = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -444,7 +445,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--forecast-root", type=Path, required=True)
     parser.add_argument("--wildfire-ranges", type=Path, required=True)
     parser.add_argument("--excluded-sensors", type=Path)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=repo / "inputs" / "model_aware_training_balance",
+    )
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--prediction-hours", type=int, default=36)
     parser.add_argument("--minimum-outdoor-history-hours", type=int, default=24)

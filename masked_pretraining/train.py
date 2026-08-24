@@ -15,56 +15,48 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .data import (
-    HistoryData,
     Normalizer,
     PairDatabase,
     PairWindowDataset,
     build_database,
     file_sha256,
     history_inventory_sha256,
-    load_school_pairs,
+    load_interval_metadata,
+    load_training_intervals,
     read_purpleair_history,
     split_series,
 )
-from .masking import STAGES, mask_batch
-from .models import ModelConfig, build_model, model_names
-from purpleair_pair_exclusions.outdoor_quality import (
-    exclude_outdoor_readings,
-    read_indoor_exclusions,
-    read_outdoor_exclusions,
+from .diagnostics import (
+    diagnostic_paths,
+    write_loss_curve,
+    write_metrics,
+    write_reconstruction_examples,
 )
+from .masking import MASK_SENTINEL, STAGES, mask_batch
+from .models import ModelConfig, build_model, model_names
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_ROOT.parent
-PURPLEAIR_ROOT = REPOSITORY_ROOT.parent / "purple-air-pull"
-DEFAULT_PAIRS = PURPLEAIR_ROOT / "purpleair_continental_us_pairs.csv"
+INPUT_ROOT = REPOSITORY_ROOT / "inputs"
+DATA_ROOT = REPOSITORY_ROOT / "data"
+PURPLEAIR_DATA = DATA_ROOT / "purple air"
+MASKED_INPUTS = INPUT_ROOT / "masked_pretraining"
+EXCLUSIONS = DATA_ROOT / "exclusions"
+DEFAULT_INTERVALS = MASKED_INPUTS / "exclusion_aware" / "training_intervals.csv"
 DEFAULT_HISTORIES = (
-    PURPLEAIR_ROOT / "purpleair_hourly_pm25_atm",
-    PURPLEAIR_ROOT / "purpleair_hourly_pm25_atm_indoor_schools_5y",
-)
-DEFAULT_SCHOOLS = (
-    REPOSITORY_ROOT
-    / "school_indoor_pm25"
-    / "data"
-    / "purpleair_indoor_school_sensors.csv"
+    PURPLEAIR_DATA / "all_indoor_pm25.csv",
+    PURPLEAIR_DATA / "all_outdoor_pm25.csv",
 )
 DEFAULT_EXCLUSIONS = (
-    REPOSITORY_ROOT / "permanently_excluded_indoor_sensors.csv",
-    REPOSITORY_ROOT / "excluded_indoor_sensors_pm25_gt1000.csv",
-    REPOSITORY_ROOT
-    / "school_indoor_pm25"
-    / "data"
-    / "excluded_indoor_schools_pm25_gt1000.csv",
+    EXCLUSIONS / "permanently_excluded_indoor_sensors.csv",
+    EXCLUSIONS / "excluded_indoor_sensors_pm25_gt1000.csv",
+    EXCLUSIONS / "excluded_indoor_schools_pm25_gt1000.csv",
 )
-DEFAULT_OUTDOOR_EXCLUSIONS = (
-    REPOSITORY_ROOT / "excluded_outdoor_purpleair_ranges.csv"
-)
-DEFAULT_INDOOR_RANGE_EXCLUSIONS = (
-    REPOSITORY_ROOT / "excluded_indoor_purpleair_ranges.csv"
-)
+DEFAULT_OUTDOOR_EXCLUSIONS = EXCLUSIONS / "excluded_outdoor_purpleair_ranges.csv"
+DEFAULT_INDOOR_RANGE_EXCLUSIONS = EXCLUSIONS / "excluded_indoor_purpleair_ranges.csv"
 DEFAULT_RESPONSIVENESS = (
-    REPOSITORY_ROOT / "pair_responsiveness" / "results" / "pair_responsiveness.csv"
+    MASKED_INPUTS / "responsiveness" / "pair_responsiveness.csv"
 )
 DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "masked_pretraining.pt"
 
@@ -94,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--batch-size", type=int, default=64)
     train.add_argument("--validation-fraction", type=float, default=0.2)
     train.add_argument("--workers", type=int, default=0)
+    train.add_argument(
+        "--reconstruction-every-epochs",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Refresh validation reconstructions every N stage epochs; 0 disables.",
+    )
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", default="auto")
     train.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
@@ -101,13 +100,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--pairs", type=Path, default=DEFAULT_PAIRS)
-    parser.add_argument("--school-sensors", type=Path, default=DEFAULT_SCHOOLS)
+    parser.add_argument("--training-intervals", type=Path, default=DEFAULT_INTERVALS)
     parser.add_argument(
-        "--excluded-sensors",
-        action="append",
+        "--interval-metadata",
         type=Path,
-        help="Additional repeatable exclusion CSV; the validated school list is always used.",
+        help="Defaults to the training interval path with .meta.json suffix.",
+    )
+    parser.add_argument(
+        "--ignore-exclusions",
+        action="store_true",
+        help="Use an interval contract generated with an empty exclusion set.",
     )
     parser.add_argument(
         "--history",
@@ -183,10 +185,13 @@ def train(args: argparse.Namespace) -> None:
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
     completed: list[str] = []
+    metrics: list[dict[str, object]] = []
+    diagnostics = diagnostic_paths(args.checkpoint)
+    write_metrics(diagnostics.metrics, metrics)
     audit = _audit_report(database, sources)
     print(
-        f"device={device} model={args.model} train_pairs={len(train_indices)} "
-        f"validation_pairs={len(validation_indices)} train_windows={len(train_data)} "
+        f"device={device} model={args.model} train_sensors={len(train_indices)} "
+        f"validation_sensors={len(validation_indices)} train_windows={len(train_data)} "
         f"validation_windows={len(validation_data)}"
     )
     for stage_index, stage in enumerate(args.stages):
@@ -225,44 +230,106 @@ def train(args: argparse.Namespace) -> None:
                 f"indoor_rmse={validation_metrics['indoor_rmse']:.3f} "
                 f"outdoor_rmse={validation_metrics['outdoor_rmse']:.3f}"
             )
-            if validation_metrics["loss"] < best_loss - args.minimum_delta:
+            improved = validation_metrics["loss"] < best_loss - args.minimum_delta
+            if improved:
                 best_loss = validation_metrics["loss"]
                 best_state = _cpu_state(model)
                 best_metrics = validation_metrics
                 stale_epochs = 0
             else:
                 stale_epochs += 1
-                if stale_epochs >= args.patience:
-                    break
+            metrics.append(
+                {
+                    "global_epoch": len(metrics) + 1,
+                    "stage": stage,
+                    "stage_epoch": epoch,
+                    "train_loss": train_metrics["loss"],
+                    "validation_loss": validation_metrics["loss"],
+                    "validation_indoor_rmse": validation_metrics["indoor_rmse"],
+                    "validation_outdoor_rmse": validation_metrics["outdoor_rmse"],
+                    "train_target_count": int(train_metrics["target_count"]),
+                    "validation_target_count": int(
+                        validation_metrics["target_count"]
+                    ),
+                    "improved_checkpoint": improved,
+                }
+            )
+            write_metrics(diagnostics.metrics, metrics)
+            if (
+                args.reconstruction_every_epochs
+                and epoch % args.reconstruction_every_epochs == 0
+            ):
+                write_reconstruction_examples(
+                    diagnostics.reconstructions,
+                    model,
+                    validation_data,
+                    stage,
+                    normalizer,
+                    device,
+                    args.seed + (stage_index + 1) * 1_000_000 + 1,
+                )
+            if stale_epochs >= args.patience:
+                break
         if best_state is None or best_metrics is None:
             raise RuntimeError(f"stage {stage} produced no valid checkpoint")
         model.load_state_dict(best_state)
         completed.append(stage)
+        write_loss_curve(diagnostics.loss_curve, metrics)
+        write_reconstruction_examples(
+            diagnostics.reconstructions,
+            model,
+            validation_data,
+            stage,
+            normalizer,
+            device,
+            args.seed + (stage_index + 1) * 1_000_000 + 1,
+        )
         metadata = {
-            "format_version": 1,
+            "format_version": 3,
             "model_name": args.model,
             "model_config": asdict(config),
             "completed_stages": completed.copy(),
             "stage": stage,
             "validation_metrics": best_metrics,
             "normalizer": asdict(normalizer),
-            "train_pair_ids": [database.series[index].pair.pair_id for index in train_indices],
-            "validation_pair_ids": [
-                database.series[index].pair.pair_id for index in validation_indices
+            "train_indoor_sensor_ids": [
+                database.series[index].indoor_id for index in train_indices
+            ],
+            "validation_indoor_sensor_ids": [
+                database.series[index].indoor_id for index in validation_indices
+            ],
+            "train_assignment_ids": [
+                assignment
+                for index in train_indices
+                for assignment in database.series[index].assignment_ids
+            ],
+            "validation_assignment_ids": [
+                assignment
+                for index in validation_indices
+                for assignment in database.series[index].assignment_ids
             ],
             "sources": sources,
             "data_audit": audit,
             "seed": args.seed,
+            "masking": {
+                "sentinel": MASK_SENTINEL,
+                "natural_missing_uses_sentinel": True,
+                "target_mask_is_model_input": False,
+            },
+            "diagnostics": {
+                "metrics_csv": str(diagnostics.metrics.resolve()),
+                "loss_curve_png": str(diagnostics.loss_curve.resolve()),
+                "reconstruction_examples_png": str(
+                    diagnostics.reconstructions.resolve()
+                ),
+                "reconstruction_every_epochs": args.reconstruction_every_epochs,
+            },
             "transfer": {
                 "retain_parameter_prefixes": ["input_projection.", "position", "encoder."],
                 "discard_parameter_prefixes": ["reconstruction_head."],
                 "input_feature_order": [
                     "outdoor_value",
                     "indoor_value",
-                    "outdoor_visible",
-                    "indoor_visible",
-                    "outdoor_artificial_mask",
-                    "indoor_artificial_mask",
                     "daily_sin",
                     "daily_cos",
                     "weekly_sin",
@@ -335,37 +402,30 @@ def run_epoch(
 def _load_database(
     args: argparse.Namespace,
 ) -> tuple[PairDatabase, dict[str, Any]]:
-    exclusions = list(
-        dict.fromkeys([*DEFAULT_EXCLUSIONS, *(args.excluded_sensors or [])])
-    )
     histories = args.history or list(DEFAULT_HISTORIES)
     tiers = set(args.responsiveness_tiers or ())
-    selection = load_school_pairs(
-        args.pairs,
-        args.school_sensors,
-        exclusions,
+    metadata_path = args.interval_metadata or args.training_intervals.with_suffix(
+        ".meta.json"
+    )
+    exclusion_paths = () if args.ignore_exclusions else (
+        *DEFAULT_EXCLUSIONS,
+        DEFAULT_INDOOR_RANGE_EXCLUSIONS,
+        DEFAULT_OUTDOOR_EXCLUSIONS,
+    )
+    interval_metadata = load_interval_metadata(
+        metadata_path, args.training_intervals, exclusion_paths
+    )
+    selection = load_training_intervals(
+        args.training_intervals,
         args.responsiveness,
         tiers,
     )
     sensor_ids = {
         sensor_id
-        for pair in selection.pairs
-        for sensor_id in (pair.indoor_id, pair.outdoor_id)
+        for interval in selection.intervals
+        for sensor_id in (interval.indoor_id, interval.outdoor_id)
     }
     history = read_purpleair_history(histories, sensor_ids)
-    indoor_exclusions = read_indoor_exclusions(DEFAULT_INDOOR_RANGE_EXCLUSIONS)
-    values, excluded_indoor_hours = exclude_outdoor_readings(
-        history.values, indoor_exclusions
-    )
-    outdoor_exclusions = read_outdoor_exclusions(DEFAULT_OUTDOOR_EXCLUSIONS)
-    values, excluded_outdoor_hours = exclude_outdoor_readings(
-        values, outdoor_exclusions
-    )
-    history = HistoryData(
-        values,
-        history.files,
-        history.row_count - excluded_indoor_hours - excluded_outdoor_hours,
-    )
     database = build_database(
         selection,
         history,
@@ -374,13 +434,11 @@ def _load_database(
         args.stride_hours,
     )
     sources = {
-        "pairs": _source_record(args.pairs),
-        "school_sensors": _source_record(args.school_sensors),
-        "excluded_sensors": [_source_record(path) for path in exclusions],
-        "excluded_indoor_ranges": _source_record(DEFAULT_INDOOR_RANGE_EXCLUSIONS),
-        "excluded_indoor_hours": excluded_indoor_hours,
-        "excluded_outdoor_ranges": _source_record(DEFAULT_OUTDOOR_EXCLUSIONS),
-        "excluded_outdoor_hours": excluded_outdoor_hours,
+        "training_intervals": _source_record(args.training_intervals),
+        "interval_metadata": _source_record(metadata_path),
+        "interval_contract": interval_metadata,
+        "exclusions_applied": not args.ignore_exclusions,
+        "reviewed_exclusion_hashes_verified": not args.ignore_exclusions,
         "responsiveness": (
             {
                 **_source_record(args.responsiveness),
@@ -401,27 +459,39 @@ def _audit_report(
     database: PairDatabase, sources: dict[str, Any]
 ) -> dict[str, Any]:
     available_indoor = sum(
-        int(summary["indoor_observations"] > 0) for summary in database.pair_summaries
+        int(summary["indoor_observations"] > 0) for summary in database.sensor_summaries
     )
     available_outdoor = sum(
-        int(summary["outdoor_observations"] > 0) for summary in database.pair_summaries
+        int(summary["outdoor_observations"] > 0) for summary in database.sensor_summaries
     )
+    contract_counts = sources["interval_contract"]["counts"]
     return {
-        "school_cohort_sensors": database.selection.school_sensor_count,
-        "selected_genuine_pairs": len(database.selection.pairs),
-        "exclusion_sensor_ids": list(database.selection.excluded_sensor_ids),
-        "pairs_removed_by_exclusions": database.selection.excluded_pair_count,
-        "pairs_removed_by_responsiveness": database.selection.responsiveness_filtered_pair_count,
-        "pairs_with_indoor_history": available_indoor,
-        "pairs_with_outdoor_history": available_outdoor,
-        "pairs_with_eligible_windows": len(database.series),
+        "interval_contract_sensors": database.selection.indoor_sensor_count,
+        "selected_indoor_sensors": len(database.selection.indoor_sensor_ids),
+        "selected_training_intervals": len(database.selection.intervals),
+        "intervals_removed_by_responsiveness": (
+            database.selection.responsiveness_filtered_interval_count
+        ),
+        "sensors_with_indoor_history": available_indoor,
+        "sensors_with_outdoor_history": available_outdoor,
+        "sensors_with_eligible_windows": len(database.series),
         "eligible_windows": database.window_count,
+        "outdoor_handoffs": database.outdoor_handoff_count,
+        "windows_crossing_outdoor_handoffs": database.windows_crossing_handoffs,
+        "hard_gap_intervals": contract_counts["unresolved_intervals"],
+        "hard_gap_hours": contract_counts["unresolved_hours"],
+        "indoor_exclusion_intervals": contract_counts["indoor_exclusion_intervals"],
+        "indoor_exclusion_hours": contract_counts["indoor_exclusion_hours"],
+        "unresolved_intervals": contract_counts["unresolved_intervals"],
+        "unresolved_hours": contract_counts["unresolved_hours"],
+        "unresolved_outdoor_intervals": contract_counts["unresolved_outdoor_intervals"],
+        "unresolved_outdoor_hours": contract_counts["unresolved_outdoor_hours"],
         "history_rows_loaded": database.history.row_count,
         "history_hours": database.history_hours,
         "minimum_observed_hours_per_channel": database.minimum_observed_hours,
         "stride_hours": database.stride_hours,
         "sources": sources,
-        "pairs": list(database.pair_summaries),
+        "sensors": list(database.sensor_summaries),
     }
 
 
@@ -445,6 +515,8 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("dropout must be between zero and one")
     if args.learning_rate <= 0 or args.weight_decay < 0 or args.minimum_delta < 0:
         raise ValueError("learning_rate, weight_decay, and minimum_delta are invalid")
+    if args.reconstruction_every_epochs < 0:
+        raise ValueError("reconstruction_every_epochs cannot be negative")
 
 
 def _resolve_device(value: str) -> torch.device:

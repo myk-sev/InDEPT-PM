@@ -28,16 +28,14 @@ from purpleair_pair_exclusions.outdoor_quality import (
 
 HOUR = 3600
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+EXCLUSION_ROOT = REPOSITORY_ROOT / "data" / "exclusions"
 DEFAULT_INDOOR_EXCLUSIONS = (
-    REPOSITORY_ROOT / "permanently_excluded_indoor_sensors.csv",
-    REPOSITORY_ROOT / "excluded_indoor_sensors_pm25_gt1000.csv",
-    REPOSITORY_ROOT
-    / "school_indoor_pm25"
-    / "data"
-    / "excluded_indoor_schools_pm25_gt1000.csv",
+    EXCLUSION_ROOT / "permanently_excluded_indoor_sensors.csv",
+    EXCLUSION_ROOT / "excluded_indoor_sensors_pm25_gt1000.csv",
+    EXCLUSION_ROOT / "excluded_indoor_schools_pm25_gt1000.csv",
 )
-DEFAULT_OUTDOOR_EXCLUSIONS = REPOSITORY_ROOT / "excluded_outdoor_purpleair_ranges.csv"
-DEFAULT_INDOOR_RANGE_EXCLUSIONS = REPOSITORY_ROOT / "excluded_indoor_purpleair_ranges.csv"
+DEFAULT_OUTDOOR_EXCLUSIONS = EXCLUSION_ROOT / "excluded_outdoor_purpleair_ranges.csv"
+DEFAULT_INDOOR_RANGE_EXCLUSIONS = EXCLUSION_ROOT / "excluded_indoor_purpleair_ranges.csv"
 PAIR_FIELDS = (
     "indoor_sensor_id",
     "indoor_name",

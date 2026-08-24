@@ -1,8 +1,10 @@
 .tools/
 .naqfc_scratch/
+.env
+backups/
 __pycache__/
 *.py[cod]
-
+*.ps1
 *.pt
 *.csv
 *.png

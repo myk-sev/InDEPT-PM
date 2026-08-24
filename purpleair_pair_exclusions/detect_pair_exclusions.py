@@ -97,23 +97,20 @@ SENSOR_FIELDS = (
     "selected_for_exclusion",
     "criterion",
 )
-PERMANENT_EXCLUSIONS_PATH = (
-    Path(__file__).resolve().parent.parent / "permanently_excluded_indoor_sensors.csv"
-)
+ROOT = Path(__file__).resolve().parent.parent
+INPUT_ROOT = ROOT / "inputs"
+DATA_ROOT = ROOT / "data"
+HISTORY_ROOT = DATA_ROOT / "purple air"
+EXCLUSION_ROOT = DATA_ROOT / "exclusions"
+DEFAULT_TRAINING_OUTPUT = INPUT_ROOT / "masked_pretraining" / "exclusion_aware"
+PERMANENT_EXCLUSIONS_PATH = EXCLUSION_ROOT / "permanently_excluded_indoor_sensors.csv"
 INDOOR_EXCLUSION_PATHS = (
     PERMANENT_EXCLUSIONS_PATH,
-    Path(__file__).resolve().parent.parent / "excluded_indoor_sensors_pm25_gt1000.csv",
-    Path(__file__).resolve().parent.parent
-    / "school_indoor_pm25"
-    / "data"
-    / "excluded_indoor_schools_pm25_gt1000.csv",
+    EXCLUSION_ROOT / "excluded_indoor_sensors_pm25_gt1000.csv",
+    EXCLUSION_ROOT / "excluded_indoor_schools_pm25_gt1000.csv",
 )
-INDOOR_RANGE_EXCLUSIONS_PATH = (
-    Path(__file__).resolve().parent.parent / "excluded_indoor_purpleair_ranges.csv"
-)
-OUTDOOR_EXCLUSIONS_PATH = (
-    Path(__file__).resolve().parent.parent / "excluded_outdoor_purpleair_ranges.csv"
-)
+INDOOR_RANGE_EXCLUSIONS_PATH = EXCLUSION_ROOT / "excluded_indoor_purpleair_ranges.csv"
+OUTDOOR_EXCLUSIONS_PATH = EXCLUSION_ROOT / "excluded_outdoor_purpleair_ranges.csv"
 
 
 @dataclass(frozen=True)
@@ -915,14 +912,14 @@ def parser() -> argparse.ArgumentParser:
         help="active PurpleAir inventory used to pair each school independently",
     )
     result.add_argument("--school-pair-distance", type=float, default=1000.0)
-    result.add_argument("--indoor-history", type=Path, action="append", required=True)
+    result.add_argument("--indoor-history", type=Path, action="append")
     result.add_argument(
         "--review-indoor-history",
         type=Path,
         action="append",
         help="1 km indoor history source to analyze and show on the review tab",
     )
-    result.add_argument("--outdoor-history", type=Path, action="append", required=True)
+    result.add_argument("--outdoor-history", type=Path, action="append")
     result.add_argument(
         "--review-outdoor-history",
         type=Path,
@@ -939,6 +936,9 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("purpleair_pair_exclusions/results"),
     )
+    result.add_argument(
+        "--training-output-dir", type=Path, default=DEFAULT_TRAINING_OUTPUT
+    )
     for field, value in asdict(Criteria()).items():
         option = "--" + field.replace("_", "-")
         result.add_argument(option, type=type(value), default=value)
@@ -947,6 +947,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    primary_indoor_paths = args.indoor_history or [HISTORY_ROOT / "all_indoor_pm25.csv"]
+    primary_outdoor_paths = args.outdoor_history or [HISTORY_ROOT / "all_outdoor_pm25.csv"]
     criteria = Criteria(
         **{field: getattr(args, field) for field in asdict(Criteria())}
     )
@@ -1006,7 +1008,7 @@ def main() -> None:
     ] + replacement_pairs + school_pairs
     cohorts = {"smoke_overlap_school": overlap_ids, "fema_school": fema_ids}
     review_indoor_paths = args.review_indoor_history or []
-    indoor_paths = [*args.indoor_history, *review_indoor_paths]
+    indoor_paths = [*primary_indoor_paths, *review_indoor_paths]
     review_indoor_ids = (
         set(read_histories(review_indoor_paths)) if review_indoor_paths else set()
     )
@@ -1032,7 +1034,7 @@ def main() -> None:
             indoor_paths, {int(row["indoor_sensor_id"]) for row in pairs}
         )
     review_paths = args.review_outdoor_history or []
-    outdoor_paths = [*args.outdoor_history, *review_paths]
+    outdoor_paths = [*primary_outdoor_paths, *review_paths]
     review_outdoor_ids = set(read_histories(review_paths)) if review_paths else set()
     outdoor = read_histories(
         outdoor_paths, {int(row["outdoor_sensor_id"]) for row in pairs}
@@ -1055,7 +1057,7 @@ def main() -> None:
         outdoor_exclusions,
     )
     interval_metadata = write_training_contract(
-        args.output_dir,
+        args.training_output_dir,
         training_intervals,
         unresolved_intervals,
         args.school_pair_distance,
@@ -1065,7 +1067,7 @@ def main() -> None:
                 source_record(args.school_smoke_overlap),
                 source_record(args.fema_school_sensors),
             ],
-            "indoor_history": [source_record(path) for path in args.indoor_history],
+            "indoor_history": [source_record(path) for path in primary_indoor_paths],
         },
         [
             source_record(path)
@@ -1147,11 +1149,11 @@ def main() -> None:
             row["selection_status"] == "no_outdoor_purpleair_pair"
             for row in cohort_selection
         ),
-        "indoor_history": [str(path.resolve()) for path in args.indoor_history],
+        "indoor_history": [str(path.resolve()) for path in primary_indoor_paths],
         "review_indoor_history": [
             str(path.resolve()) for path in review_indoor_paths
         ],
-        "outdoor_history": [str(path.resolve()) for path in args.outdoor_history],
+        "outdoor_history": [str(path.resolve()) for path in primary_outdoor_paths],
         "review_outdoor_history": [str(path.resolve()) for path in review_paths],
         "training_intervals": interval_metadata["counts"],
     }

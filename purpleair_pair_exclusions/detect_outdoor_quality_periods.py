@@ -34,7 +34,10 @@ from purpleair_pair_exclusions.outdoor_sensor_error import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-KNOWN_EXCLUSIONS = ROOT / "excluded_outdoor_purpleair_ranges.csv"
+DATA_ROOT = ROOT / "data"
+KNOWN_EXCLUSIONS = DATA_ROOT / "exclusions" / "excluded_outdoor_purpleair_ranges.csv"
+DEFAULT_INDOOR_HISTORY = DATA_ROOT / "purple air" / "all_indoor_pm25.csv"
+DEFAULT_OUTDOOR_HISTORY = DATA_ROOT / "purple air" / "all_outdoor_pm25.csv"
 PERIOD_FIELDS = (
     "indoor_sensor_id",
     "indoor_name",
@@ -615,14 +618,14 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("../purple-air-pull/purpleair_continental_us_sensors.csv"),
     )
-    result.add_argument("--indoor-history", type=Path, action="append", required=True)
+    result.add_argument("--indoor-history", type=Path, action="append")
     result.add_argument(
         "--review-indoor-history",
         type=Path,
         action="append",
         help="1 km indoor history source used only as an additional review input",
     )
-    result.add_argument("--outdoor-history", type=Path, action="append", required=True)
+    result.add_argument("--outdoor-history", type=Path, action="append")
     result.add_argument(
         "--review-outdoor-history",
         type=Path,
@@ -652,6 +655,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    args.indoor_history = args.indoor_history or [DEFAULT_INDOOR_HISTORY]
+    args.outdoor_history = args.outdoor_history or [DEFAULT_OUTDOOR_HISTORY]
     event_criteria = Criteria()
     period_criteria = PeriodCriteria(
         minimum_events=args.minimum_period_events,

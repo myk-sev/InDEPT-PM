@@ -11,14 +11,16 @@ from pm25_models import DEFAULT_MODEL, build_config, model_names
 
 
 ROOT = Path(__file__).resolve().parent
+INPUT_ROOT = ROOT / "inputs"
+DATA_ROOT = ROOT / "data"
 PURPLEAIR_ROOT = ROOT.parent / "purple-air-pull"
-DEFAULT_PAIRS = ROOT / "purpleair_continental_us_pairs_thinned_20km.csv"
+DEFAULT_PAIRS = DATA_ROOT / "legacy" / "purpleair_continental_us_pairs_thinned_20km.csv"
 DEFAULT_INDOOR = PURPLEAIR_ROOT / "purpleair_hourly_pm25_atm"
 DEFAULT_TEMPO = (
     PURPLEAIR_ROOT / "tempo_pm25_sensor_match" / "tempo_pm25_indoor_sensors.csv"
 )
 DEFAULT_NAQFC = ROOT / "naqfc_output"
-DEFAULT_EXCLUSIONS = ROOT / "excluded_indoor_sensors_pm25_gt1000.csv"
+DEFAULT_EXCLUSIONS = DATA_ROOT / "exclusions" / "excluded_indoor_sensors_pm25_gt1000.csv"
 SPLITS = ("train", "validation", "temporal_test", "location_test")
 LINEAR_TIME_FEATURES = ("hour", "weekday", "month", "day")
 CYCLICAL_TIME_FEATURES = (
@@ -45,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forecast-root", type=Path, default=DEFAULT_NAQFC)
     parser.add_argument("--excluded-sensors", type=Path, default=DEFAULT_EXCLUSIONS)
     parser.add_argument("--balanced-training-index", type=Path)
-    parser.add_argument("--output", type=Path, default=ROOT / "old_training_data.csv")
+    parser.add_argument("--output", type=Path, default=INPUT_ROOT / "old_training_data.csv")
     parser.add_argument("--model", choices=model_names(), default=DEFAULT_MODEL)
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--prediction-hours", type=int, default=36)

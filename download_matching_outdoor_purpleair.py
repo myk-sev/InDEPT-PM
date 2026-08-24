@@ -26,6 +26,7 @@ API_URL = "https://api.purpleair.com/v1/sensors/{sensor}/history"
 HOUR = 3600
 MAX_REQUEST_HOURS = 180 * 24
 DEFAULT_FINAL_FILENAME = "outdoor_pm25.csv"
+DEFAULT_OUTPUT_DIRECTORY = Path(__file__).resolve().parent / "data" / "purple air"
 CHECKPOINT_DIRECTORY = "outdoor_sensor_history"
 HISTORY_COLUMNS = ("time_stamp", "sensor_index", "pm2.5_atm")
 STATUS_COLUMNS = (
@@ -136,8 +137,22 @@ def arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        required=True,
+        default=DEFAULT_OUTPUT_DIRECTORY,
         help="Directory for the final CSV and outdoor_sensor_history backups",
+    )
+    parser.add_argument(
+        "--baseline-history",
+        type=Path,
+        action="append",
+        default=[],
+        help="Existing consolidated history used only to skip downloaded hours",
+    )
+    parser.add_argument(
+        "--baseline-checkpoint-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help="Existing status directory used only to skip previously attempted hours",
     )
     parser.add_argument(
         "--final-csv-name",
@@ -360,6 +375,36 @@ def read_final_download(path: Path) -> dict[int, dict[int, float]]:
     return values
 
 
+def read_baseline_downloads(paths: list[Path]) -> dict[int, dict[int, float]]:
+    values: dict[int, dict[int, float]] = {}
+    for path in paths:
+        for sensor, sensor_values in read_final_download(path).items():
+            combined = values.setdefault(sensor, {})
+            for timestamp, value in sensor_values.items():
+                previous = combined.setdefault(timestamp, value)
+                if previous != value:
+                    raise ValueError(
+                        f"conflicting baseline value for sensor {sensor} at {timestamp}"
+                    )
+    return values
+
+
+def combine_downloads(
+    baseline: dict[int, dict[int, float]],
+    output: dict[int, dict[int, float]],
+) -> dict[int, dict[int, float]]:
+    combined = {sensor: dict(values) for sensor, values in baseline.items()}
+    for sensor, sensor_values in output.items():
+        values = combined.setdefault(sensor, {})
+        for timestamp, value in sensor_values.items():
+            previous = values.setdefault(timestamp, value)
+            if previous != value:
+                raise ValueError(
+                    f"output conflicts with baseline for sensor {sensor} at {timestamp}"
+                )
+    return combined
+
+
 def read_attempted(path: Path, targets: frozenset[int]) -> set[int]:
     if not path.exists():
         return set()
@@ -417,6 +462,7 @@ def make_plan(
     targets: set[int],
     output_dir: Path,
     final_values: dict[int, float] | None = None,
+    baseline_checkpoint_dirs: list[Path] | None = None,
 ) -> Plan:
     frozen = frozenset(targets)
     downloaded_values = dict(final_values or {})
@@ -426,7 +472,10 @@ def make_plan(
         if previous != value:
             raise ValueError(f"conflicting saved values for outdoor sensor {sensor}")
     downloaded = set(downloaded_values) & frozen
-    attempted = read_attempted(directory / f"{sensor}.status.csv", frozen) - downloaded
+    attempted = read_attempted(directory / f"{sensor}.status.csv", frozen)
+    for baseline in baseline_checkpoint_dirs or []:
+        attempted.update(read_attempted(baseline / f"{sensor}.status.csv", frozen))
+    attempted -= downloaded
     pending = set(frozen) - downloaded - attempted
     return Plan(sensor, frozen, contiguous_ranges(pending), len(downloaded), len(attempted))
 
@@ -593,6 +642,8 @@ def summarize(
     matched_indoor_targets: dict[int, set[int]],
     pairs: dict[int, int],
     mode: str,
+    baseline_values: dict[int, dict[int, float]] | None = None,
+    output_values: dict[int, dict[int, float]] | None = None,
 ) -> dict[str, object]:
     request_hours = sum(
         (end - start) // HOUR for plan in plans for start, end in plan.ranges
@@ -613,6 +664,14 @@ def summarize(
         "paired_sensors_without_input_readings": len(set(pairs) - set(all_indoor_targets)),
         "outdoor_sensors": len(plans),
         "outdoor_sensor_hours_required": sum(len(plan.targets) for plan in plans),
+        "baseline_target_hours": sum(
+            len(plan.targets & (baseline_values or {}).get(plan.sensor, {}).keys())
+            for plan in plans
+        ),
+        "review_output_target_hours": sum(
+            len(plan.targets & (output_values or {}).get(plan.sensor, {}).keys())
+            for plan in plans
+        ),
         "already_downloaded": sum(plan.downloaded for plan in plans),
         "previously_attempted_without_data": sum(plan.attempted_without_data for plan in plans),
         "pending_target_hours": sum(
@@ -635,6 +694,9 @@ def require_columns(
 
 def main() -> None:
     args = arguments()
+    for path in args.baseline_checkpoint_dir:
+        if not path.is_dir():
+            raise FileNotFoundError(f"baseline checkpoint directory not found: {path}")
     if args.execute:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         migrate_legacy_checkpoints(args.output_dir)
@@ -652,14 +714,30 @@ def main() -> None:
         if timestamps:
             outdoor_targets.setdefault(pairs[indoor], set()).update(timestamps)
     final_values = read_final_download(args.output_dir / args.final_csv_name)
+    baseline_values = read_baseline_downloads(args.baseline_history)
+    planning_values = combine_downloads(baseline_values, final_values)
     plans = [
-        make_plan(sensor, targets, args.output_dir, final_values.get(sensor))
+        make_plan(
+            sensor,
+            targets,
+            args.output_dir,
+            planning_values.get(sensor),
+            args.baseline_checkpoint_dir,
+        )
         for sensor, targets in sorted(outdoor_targets.items())
     ]
     mode = "execute" if args.execute else "dry-run"
     print(
         json.dumps(
-            summarize(plans, all_indoor_targets, indoor_targets, pairs, mode),
+            summarize(
+                plans,
+                all_indoor_targets,
+                indoor_targets,
+                pairs,
+                mode,
+                baseline_values,
+                final_values,
+            ),
             indent=2,
         )
     )
