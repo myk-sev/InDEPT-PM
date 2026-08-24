@@ -21,6 +21,9 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "TRAINER=pm25_transformer.py"
+set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
+set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
+set "INFERENCE_ROOT=inference\exclusion_informed_finetuned_non_masked_matrix"
 set "SCHOOL_DATA=inputs\school_old_training_data_exclusion_informed_finetuned.csv"
 set "SCHOOL_CYCLICAL_DATA=inputs\school_old_training_data_exclusion_informed_finetuned_cyclical.csv"
 set "ALL_DATA=inputs\all_old_training_data_exclusion_informed_finetuned.csv"
@@ -29,6 +32,8 @@ set "ALL_CYCLICAL_DATA=inputs\all_old_training_data_exclusion_informed_finetuned
 for %%P in (
     "%PYTHON%"
     "%TRAINER%"
+    "%LINEAR_CACHE%"
+    "%CYCLICAL_CACHE%"
     "%SCHOOL_DATA%"
     "%SCHOOL_CYCLICAL_DATA%"
     "%ALL_DATA%"
@@ -74,10 +79,16 @@ exit /b 0
 set "MODEL=%~1"
 set "EPOCHS=%~2"
 set "TRAINING_DATA=%LINEAR_DATA%"
-if not "%MODEL:cyclical=%"=="%MODEL%" set "TRAINING_DATA=%CYCLICAL_DATA%"
+set "CACHE=%LINEAR_CACHE%"
+if not "%MODEL:cyclical=%"=="%MODEL%" (
+    set "TRAINING_DATA=%CYCLICAL_DATA%"
+    set "CACHE=%CYCLICAL_CACHE%"
+)
 set "CHECKPOINT=old-non-masked-%DATASET%-exclusion-informed-finetuned-%MODEL%-%EPOCHS%ep.pt"
+set "INFERENCE_DIR=%INFERENCE_ROOT%\%DATASET%\%MODEL%\%EPOCHS%ep"
 set /a TRAINING_COUNT+=1 >nul
 echo Starting %DATASET% / %MODEL%: epochs=%EPOCHS% patience=%EPOCHS% data=%TRAINING_DATA% checkpoint=%CHECKPOINT%
+echo Inference examples: cache=%CACHE% output=%INFERENCE_DIR%
 if defined DRY_RUN exit /b 0
 
 %PYTHON% %TRAINER% train ^
@@ -91,6 +102,16 @@ if defined DRY_RUN exit /b 0
     --checkpoint "%CHECKPOINT%"
 if errorlevel 1 (
     echo Training failed for %DATASET% / %MODEL% at %EPOCHS% epochs.
+    exit /b 1
+)
+
+%PYTHON% -m inference.run_cached_inference ^
+    --cache "%CACHE%" ^
+    --checkpoint "checkpoints\%CHECKPOINT%" ^
+    --output-dir "%INFERENCE_DIR%" ^
+    --device "%DEVICE%"
+if errorlevel 1 (
+    echo Inference examples failed for %DATASET% / %MODEL% at %EPOCHS% epochs.
     exit /b 1
 )
 exit /b 0
