@@ -1,4 +1,4 @@
-"""Models that predict changes from the last indoor observation."""
+"""Models that predict indoor PM2.5 changes."""
 
 import torch
 
@@ -9,7 +9,15 @@ from .cyclical_transformers import (
 from .patchtst import CyclicalPatchTST, PatchTST
 
 
-class _DeltaFromLastHour:
+class _StepDeltaFromLastHour:
+    def forward(
+        self, history: torch.Tensor, forecast: torch.Tensor
+    ) -> torch.Tensor:
+        delta = super().forward(history, forecast)
+        return delta.cumsum(dim=1) + history[:, -1, 1].unsqueeze(1)
+
+
+class _AbsoluteDeltaFromLastHour:
     def forward(
         self, history: torch.Tensor, forecast: torch.Tensor
     ) -> torch.Tensor:
@@ -18,26 +26,50 @@ class _DeltaFromLastHour:
 
 
 class DeltaCyclicalDualEncoderPatchTransformer(
-    _DeltaFromLastHour, CyclicalDualEncoderPatchTransformer
+    _StepDeltaFromLastHour, CyclicalDualEncoderPatchTransformer
 ):
-    """Predict indoor PM2.5 changes with the cyclical patch transformer."""
+    """Predict cumulative hourly PM2.5 changes with the cyclical transformer."""
 
 
 class DeltaCyclicalDualEncoderTransformer(
-    _DeltaFromLastHour, CyclicalDualEncoderTransformer
+    _StepDeltaFromLastHour, CyclicalDualEncoderTransformer
 ):
-    """Predict indoor PM2.5 changes with the cyclical timestep transformer."""
+    """Predict cumulative hourly PM2.5 changes with the timestep transformer."""
 
 
-class DeltaPatchTST(_DeltaFromLastHour, PatchTST):
-    """Predict indoor PM2.5 changes with PatchTST."""
+class DeltaPatchTST(_StepDeltaFromLastHour, PatchTST):
+    """Predict cumulative hourly PM2.5 changes with PatchTST."""
 
 
-class DeltaCyclicalPatchTST(_DeltaFromLastHour, CyclicalPatchTST):
-    """Predict indoor PM2.5 changes with cyclical PatchTST."""
+class DeltaCyclicalPatchTST(_StepDeltaFromLastHour, CyclicalPatchTST):
+    """Predict cumulative hourly PM2.5 changes with cyclical PatchTST."""
+
+
+class AbsoluteDeltaCyclicalDualEncoderPatchTransformer(
+    _AbsoluteDeltaFromLastHour, CyclicalDualEncoderPatchTransformer
+):
+    """Preserve the original horizon-wise delta behavior."""
+
+
+class AbsoluteDeltaCyclicalDualEncoderTransformer(
+    _AbsoluteDeltaFromLastHour, CyclicalDualEncoderTransformer
+):
+    """Preserve the original horizon-wise delta behavior."""
+
+
+class AbsoluteDeltaPatchTST(_AbsoluteDeltaFromLastHour, PatchTST):
+    """Preserve the original horizon-wise delta behavior."""
+
+
+class AbsoluteDeltaCyclicalPatchTST(_AbsoluteDeltaFromLastHour, CyclicalPatchTST):
+    """Preserve the original horizon-wise delta behavior."""
 
 
 __all__ = [
+    "AbsoluteDeltaCyclicalDualEncoderPatchTransformer",
+    "AbsoluteDeltaCyclicalDualEncoderTransformer",
+    "AbsoluteDeltaCyclicalPatchTST",
+    "AbsoluteDeltaPatchTST",
     "DeltaCyclicalDualEncoderPatchTransformer",
     "DeltaCyclicalDualEncoderTransformer",
     "DeltaCyclicalPatchTST",

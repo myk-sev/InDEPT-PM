@@ -5,6 +5,10 @@ from .cyclical_transformers import (
     CyclicalTimestepTransformerConfig,
 )
 from .delta_models import (
+    AbsoluteDeltaCyclicalDualEncoderPatchTransformer,
+    AbsoluteDeltaCyclicalDualEncoderTransformer,
+    AbsoluteDeltaCyclicalPatchTST,
+    AbsoluteDeltaPatchTST,
     DeltaCyclicalDualEncoderPatchTransformer,
     DeltaCyclicalDualEncoderTransformer,
     DeltaCyclicalPatchTST,
@@ -37,6 +41,7 @@ from .registry import (
     model_names,
     register_model,
 )
+from .separate_stream_fusion import SeparateStreamFusionTransformer
 
 ModelConfig = (
     PatchTransformerConfig
@@ -53,6 +58,11 @@ register_model(
 register_model(
     "transformer-no-patches",
     DualEncoderTransformer,
+    TimestepTransformerConfig,
+)
+register_model(
+    "separate-stream-fusion",
+    SeparateStreamFusionTransformer,
     TimestepTransformerConfig,
 )
 register_model(
@@ -83,8 +93,28 @@ register_model(
     DeltaCyclicalPatchTST,
     CyclicalPatchTSTConfig,
 )
+register_model(
+    "transformer-cyclical-absolute-delta",
+    AbsoluteDeltaCyclicalDualEncoderPatchTransformer,
+    CyclicalPatchTransformerConfig,
+)
+register_model(
+    "transformer-no-patches-cyclical-absolute-delta",
+    AbsoluteDeltaCyclicalDualEncoderTransformer,
+    CyclicalTimestepTransformerConfig,
+)
+register_model("patchtst-absolute-delta", AbsoluteDeltaPatchTST, PatchTSTConfig)
+register_model(
+    "patchtst-cyclical-absolute-delta",
+    AbsoluteDeltaCyclicalPatchTST,
+    CyclicalPatchTSTConfig,
+)
 
 __all__ = [
+    "AbsoluteDeltaCyclicalDualEncoderPatchTransformer",
+    "AbsoluteDeltaCyclicalDualEncoderTransformer",
+    "AbsoluteDeltaCyclicalPatchTST",
+    "AbsoluteDeltaPatchTST",
     "DEFAULT_MODEL",
     "MODEL_SPECS",
     "ChannelIndependentPatchEmbedding",
@@ -106,6 +136,7 @@ __all__ = [
     "PatchEmbedding",
     "PatchTST",
     "PatchTSTConfig",
+    "SeparateStreamFusionTransformer",
     "TimestepEmbedding",
     "TimestepTransformerConfig",
     "_missing_aware_history",
