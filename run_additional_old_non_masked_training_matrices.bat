@@ -2,7 +2,7 @@
 setlocal
 
 rem Usage: run_additional_old_non_masked_training_matrices.bat [device] [batch_size] [num_workers]
-rem Add --dry-run first to print the 210 runs without starting training.
+rem Add --dry-run first to print the 168 runs without starting training.
 if /i "%~1"=="--dry-run" (
     set "DRY_RUN=1"
     shift
@@ -29,8 +29,6 @@ for %%P in (
     "%TRAINER%"
     "%LINEAR_CACHE%"
     "%CYCLICAL_CACHE%"
-    "inputs\all_old_training_data.csv"
-    "inputs\all_old_training_data_cyclical.csv"
     "inputs\balanced_old_training_data.csv"
     "inputs\balanced_old_training_data_cyclical.csv"
     "inputs\non_school_old_training_data_exclusion_aware.csv"
@@ -46,7 +44,6 @@ for %%P in (
     )
 )
 
-call :run_dataset "all" "inputs\all_old_training_data.csv" "inputs\all_old_training_data_cyclical.csv" || goto :fail
 call :run_dataset "balanced" "inputs\balanced_old_training_data.csv" "inputs\balanced_old_training_data_cyclical.csv" || goto :fail
 call :run_dataset "non-school-exclusion-aware" "inputs\non_school_old_training_data_exclusion_aware.csv" "inputs\non_school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
 call :run_dataset "school" "inputs\school_old_training_data.csv" "inputs\school_old_training_data_cyclical.csv" || goto :fail
