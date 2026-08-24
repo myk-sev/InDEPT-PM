@@ -41,7 +41,10 @@ from .registry import (
     model_names,
     register_model,
 )
-from .separate_stream_fusion import SeparateStreamFusionTransformer
+from .separate_stream_fusion import (
+    SeparateStreamCrossFusionTransformer,
+    SeparateStreamSelfFusionTransformer,
+)
 
 ModelConfig = (
     PatchTransformerConfig
@@ -61,8 +64,13 @@ register_model(
     TimestepTransformerConfig,
 )
 register_model(
-    "separate-stream-fusion",
-    SeparateStreamFusionTransformer,
+    "separate-stream-cross-fusion",
+    SeparateStreamCrossFusionTransformer,
+    TimestepTransformerConfig,
+)
+register_model(
+    "separate-stream-self-fusion",
+    SeparateStreamSelfFusionTransformer,
     TimestepTransformerConfig,
 )
 register_model(
@@ -136,7 +144,8 @@ __all__ = [
     "PatchEmbedding",
     "PatchTST",
     "PatchTSTConfig",
-    "SeparateStreamFusionTransformer",
+    "SeparateStreamCrossFusionTransformer",
+    "SeparateStreamSelfFusionTransformer",
     "TimestepEmbedding",
     "TimestepTransformerConfig",
     "_missing_aware_history",
