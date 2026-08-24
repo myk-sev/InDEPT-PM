@@ -130,6 +130,24 @@ changes between epochs directly comparable. The interval resets at the start
 of each masking stage. The default `0` disables periodic reconstruction while
 retaining the best-checkpoint plot at the end of every stage.
 
+Resume a saved model for more epochs with `--resume`. Unless `--stages` is
+provided, training continues the masking stage recorded in the checkpoint.
+The continuation runs all requested epochs rather than stopping early.
+
+```powershell
+.\.venv\Scripts\python.exe -m masked_pretraining train `
+  --resume .\masked_pretraining\runs\checkpoints\masked_pretraining.pt `
+  --epochs-per-stage 10 `
+  --checkpoint .\masked_pretraining\runs\checkpoints\masked_pretraining_resumed.pt
+```
+
+Use the same model and data arguments as the original run; incompatible model
+configuration, sources, normalization, or sensor splits are rejected. New
+checkpoints include optimizer state. Older weight-only checkpoints can also be
+resumed, but begin the continuation with a fresh optimizer. Only resume
+checkpoints you trust because PyTorch checkpoint loading can execute serialized
+code.
+
 ## Readiness check
 
 Run `.\.venv\Scripts\python.exe -m masked_pretraining audit` immediately before

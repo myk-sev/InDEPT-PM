@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -78,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--layers", type=int, default=3)
     train.add_argument("--heads", type=int, default=4)
     train.add_argument("--dropout", type=float, default=0.1)
-    train.add_argument("--stages", nargs="+", choices=STAGES, default=list(STAGES))
+    train.add_argument("--stages", nargs="+", choices=STAGES)
     train.add_argument("--epochs-per-stage", type=int, default=20)
     train.add_argument("--patience", type=int, default=3)
     train.add_argument("--minimum-delta", type=float, default=1e-4)
@@ -97,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", default="auto")
     train.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    train.add_argument(
+        "--resume",
+        type=Path,
+        metavar="CHECKPOINT",
+        help="Resume the checkpoint stage unless --stages is set.",
+    )
     return parser
 
 
@@ -150,6 +157,11 @@ def main(argv: list[str] | None = None) -> None:
 
 def train(args: argparse.Namespace) -> None:
     _validate_training_arguments(args)
+    resume = _load_checkpoint(args.resume) if args.resume else None
+    resume_metadata = resume["metadata"] if resume else None
+    stages = args.stages or (
+        [str(resume_metadata["stage"])] if resume_metadata else list(STAGES)
+    )
     _seed_everything(args.seed)
     database, sources = _load_database(args)
     train_indices, validation_indices = split_series(
@@ -185,7 +197,31 @@ def train(args: argparse.Namespace) -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
-    completed: list[str] = []
+    optimizer_resumed = False
+    if resume:
+        _validate_resume_checkpoint(
+            resume,
+            args.model,
+            config,
+            normalizer,
+            database,
+            train_indices,
+            validation_indices,
+            sources,
+        )
+        model.load_state_dict(resume["model_state"])
+        if "optimizer_state" in resume:
+            optimizer.load_state_dict(resume["optimizer_state"])
+            optimizer_resumed = True
+        print(
+            f"resumed_from={args.resume} "
+            f"optimizer_state={'restored' if optimizer_resumed else 'fresh'}"
+        )
+    completed = (
+        list(dict.fromkeys(resume_metadata.get("completed_stages", ())))
+        if resume_metadata
+        else []
+    )
     metrics: list[dict[str, object]] = []
     diagnostics = diagnostic_paths(args.checkpoint)
     write_metrics(diagnostics.metrics, metrics)
@@ -196,15 +232,29 @@ def train(args: argparse.Namespace) -> None:
         f"validation_windows={len(validation_data)}"
     )
     started = time.perf_counter()
-    estimated_total_epochs = len(args.stages) * args.epochs_per_stage
-    for stage_index, stage in enumerate(args.stages):
-        best_loss = float("inf")
-        best_state: dict[str, torch.Tensor] | None = None
+    estimated_total_epochs = len(stages) * args.epochs_per_stage
+    for stage_index, stage in enumerate(stages):
+        continuing_stage = bool(
+            resume_metadata and stage_index == 0 and stage == resume_metadata["stage"]
+        )
+        best_loss = (
+            float(resume_metadata["validation_metrics"]["loss"])
+            if continuing_stage
+            else float("inf")
+        )
+        best_state = _cpu_state(model) if continuing_stage else None
+        best_optimizer_state = (
+            copy.deepcopy(optimizer.state_dict()) if continuing_stage else None
+        )
         stale_epochs = 0
         training_masks = torch.Generator().manual_seed(
             args.seed + (stage_index + 1) * 10_000
         )
-        best_metrics: dict[str, float] | None = None
+        best_metrics = (
+            dict(resume_metadata["validation_metrics"])
+            if continuing_stage
+            else None
+        )
         for epoch in range(1, args.epochs_per_stage + 1):
             train_metrics = run_epoch(
                 model,
@@ -230,10 +280,12 @@ def train(args: argparse.Namespace) -> None:
             if improved:
                 best_loss = validation_metrics["loss"]
                 best_state = _cpu_state(model)
+                best_optimizer_state = copy.deepcopy(optimizer.state_dict())
                 best_metrics = validation_metrics
                 stale_epochs = 0
             else:
                 stale_epochs += 1
+            stop_early = stale_epochs >= args.patience and not continuing_stage
             metrics.append(
                 {
                     "global_epoch": len(metrics) + 1,
@@ -250,7 +302,7 @@ def train(args: argparse.Namespace) -> None:
                     "improved_checkpoint": improved,
                 }
             )
-            if stale_epochs >= args.patience:
+            if stop_early:
                 estimated_total_epochs -= args.epochs_per_stage - epoch
             elapsed = time.perf_counter() - started
             estimated_remaining = elapsed / len(metrics) * (
@@ -279,12 +331,13 @@ def train(args: argparse.Namespace) -> None:
                     device,
                     args.seed + (stage_index + 1) * 1_000_000 + 1,
                 )
-            if stale_epochs >= args.patience:
+            if stop_early:
                 break
         if best_state is None or best_metrics is None:
             raise RuntimeError(f"stage {stage} produced no valid checkpoint")
         model.load_state_dict(best_state)
-        completed.append(stage)
+        if stage not in completed:
+            completed.append(stage)
         write_loss_curve(diagnostics.loss_curve, metrics)
         write_reconstruction_examples(
             diagnostics.reconstructions,
@@ -335,6 +388,11 @@ def train(args: argparse.Namespace) -> None:
                 ),
                 "reconstruction_every_epochs": args.reconstruction_every_epochs,
             },
+            "training": {
+                "resumed_from": str(args.resume.resolve()) if args.resume else None,
+                "optimizer_state_resumed": optimizer_resumed,
+                "epochs_completed_this_run": len(metrics),
+            },
             "transfer": {
                 "retain_parameter_prefixes": ["input_projection.", "position", "encoder."],
                 "discard_parameter_prefixes": ["reconstruction_head."],
@@ -351,8 +409,8 @@ def train(args: argparse.Namespace) -> None:
             },
         }
         stage_checkpoint = _stage_checkpoint(args.checkpoint, stage)
-        _save_checkpoint(stage_checkpoint, best_state, metadata)
-        _save_checkpoint(args.checkpoint, best_state, metadata)
+        _save_checkpoint(stage_checkpoint, best_state, metadata, best_optimizer_state)
+        _save_checkpoint(args.checkpoint, best_state, metadata, best_optimizer_state)
         print(f"saved={stage_checkpoint}")
     print(f"final_checkpoint={args.checkpoint}")
 
@@ -530,6 +588,65 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("reconstruction_every_epochs cannot be negative")
 
 
+def _validate_resume_checkpoint(
+    checkpoint: dict[str, Any],
+    model_name: str,
+    config: ModelConfig,
+    normalizer: Normalizer,
+    database: PairDatabase,
+    train_indices: list[int],
+    validation_indices: list[int],
+    sources: dict[str, Any],
+) -> None:
+    metadata = checkpoint["metadata"]
+    expected = {
+        "model_name": model_name,
+        "model_config": asdict(config),
+        "normalizer": asdict(normalizer),
+        "train_indoor_sensor_ids": [
+            database.series[index].indoor_id for index in train_indices
+        ],
+        "validation_indoor_sensor_ids": [
+            database.series[index].indoor_id for index in validation_indices
+        ],
+        "train_assignment_ids": [
+            assignment
+            for index in train_indices
+            for assignment in database.series[index].assignment_ids
+        ],
+        "validation_assignment_ids": [
+            assignment
+            for index in validation_indices
+            for assignment in database.series[index].assignment_ids
+        ],
+        "sources": sources,
+    }
+    mismatches = [
+        name for name, value in expected.items() if metadata.get(name) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "resume checkpoint does not match the current training configuration: "
+            + ", ".join(mismatches)
+        )
+
+
+def _load_checkpoint(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"resume checkpoint does not exist: {path}")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or not isinstance(
+        checkpoint.get("model_state"), dict
+    ) or not isinstance(checkpoint.get("metadata"), dict):
+        raise ValueError(f"invalid masked pretraining checkpoint: {path}")
+    metadata = checkpoint["metadata"]
+    if metadata.get("stage") not in STAGES or "loss" not in metadata.get(
+        "validation_metrics", {}
+    ):
+        raise ValueError(f"masked pretraining checkpoint is incomplete: {path}")
+    return checkpoint
+
+
 def _resolve_device(value: str) -> torch.device:
     if value == "auto":
         if hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -572,14 +689,20 @@ def _stage_checkpoint(path: Path, stage: str) -> Path:
 
 
 def _save_checkpoint(
-    path: Path, state: dict[str, torch.Tensor], metadata: dict[str, Any]
+    path: Path,
+    state: dict[str, torch.Tensor],
+    metadata: dict[str, Any],
+    optimizer_state: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False)
     temporary = Path(handle.name)
     handle.close()
     try:
-        torch.save({"model_state": state, "metadata": metadata}, temporary)
+        checkpoint = {"model_state": state, "metadata": metadata}
+        if optimizer_state is not None:
+            checkpoint["optimizer_state"] = optimizer_state
+        torch.save(checkpoint, temporary)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
