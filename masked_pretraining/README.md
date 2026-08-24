@@ -7,54 +7,41 @@ forecasting model.
 
 ## Static data contract
 
-Masked training reads
-`inputs/masked_pretraining/exclusion_aware/training_intervals.csv`. Each half-open UTC
-interval assigns one indoor sensor to one outdoor PurpleAir sensor. The
-matching process resolves distance ranking, reviewed exclusions, fallback
-selection, and restoration of the closer sensor before training begins.
-`selected_pairs.csv` remains a diagnostic output and is not a training input.
+Masked training reads exactly one model input:
+`inputs/masked_pretraining/exclusion_aware/training_data.csv`. Each row contains
+one half-open UTC indoor/outdoor assignment interval, its responsiveness tier,
+and both sensors' PM2.5 readings for that interval. The readings are sparse JSON
+lists of `[hour_offset, value]`, where the offset is measured from `start_utc`.
+An absent offset is a naturally missing observation.
 
-The required `training_intervals.meta.json` sidecar records the manifest hash,
-matching radius, inputs, and all reviewed exclusion-file hashes. Training fails
-when the manifest hash is wrong or any reviewed exclusion file has changed.
-Rerun the exclusion-aware matching process to refresh a stale contract.
+Distance ranking, reviewed exclusions, fallback selection, and restoration of
+the closer sensor are resolved while this file is generated. Training does not
+read the source histories, exclusion files, a metadata sidecar, or a separate
+responsiveness file. Regenerate the CSV after any generation input changes.
 
 The loader builds one continuous series for each indoor sensor. Adjacent
 outdoor assignments are stitched, so a 168-hour window may cross an outdoor
 sensor handoff. A manifest gap is a hard boundary, and a window can never
 contain more than one indoor sensor ID. Outdoor sensor and assignment IDs are
-retained per hour for audit provenance but are not model inputs.
+retained per hour for audits and checkpoint compatibility but are not model
+inputs.
 
-Each history CSV must contain `time_stamp,sensor_index,pm2.5_atm`. Directories
-are scanned recursively for numeric sensor-named CSVs. The defaults contain all
-retrieved school and non-school sensors:
-
-- `data/purple air/all_indoor_pm25.csv`
-- `data/purple air/all_outdoor_pm25.csv`
-
-Override the interval contract or histories when needed:
+Select a different generated dataset with one argument:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining audit `
-  --training-intervals C:\path\to\training_intervals.csv `
-  --history C:\path\to\school_indoor_purpleair `
-  --history C:\path\to\school_outdoor_purpleair
+  --training-data C:\path\to\training_data.csv
 ```
 
-The metadata path defaults to `training_intervals.meta.json` beside the CSV and
-can be overridden with `--interval-metadata`. Natural missing observations
-inside an assignment remain missing. They are not reconstruction targets and
-are governed by `--minimum-observed-hours`, which defaults to 144 observations
-per channel in each 168-hour window.
+Natural missing observations are not reconstruction targets and are governed
+by `--minimum-observed-hours`, which defaults to 144 observations per channel
+in each 168-hour window.
 
-An intentionally exclusion-free contract has an empty `exclusions` list in its
-metadata and must be selected explicitly with `--ignore-exclusions`. This keeps
-it separate from the default exclusion-aware input.
-
-The default interval contract is the K-12 cohort. All-retrieved-sensor variants
+The default dataset is the exclusion-aware K-12 cohort. All-retrieved-sensor
+variants
 are stored under `inputs/masked_pretraining/all_sensors/exclusion_aware` and
-`inputs/masked_pretraining/all_sensors/no_exclusions`; select either with
-`--training-intervals`, adding `--ignore-exclusions` for the latter.
+`inputs/masked_pretraining/all_sensors/no_exclusions`; select one by passing its
+`training_data.csv` to `--training-data`.
 
 ## Training
 
@@ -164,5 +151,5 @@ code.
 
 Run `.\.venv\Scripts\python.exe -m masked_pretraining audit` immediately before
 training. It reports selected indoor sensors, intervals, outdoor handoffs,
-windows crossing handoffs, hard gaps, unresolved periods, and eligible windows
-using only the static interval contract and consolidated PurpleAir histories.
+windows crossing handoffs, hard gaps, and eligible windows using only the
+selected `training_data.csv`.

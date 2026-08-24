@@ -24,8 +24,8 @@ from purpleair_pair_exclusions.outdoor_quality import (
 from purpleair_pair_exclusions.training_intervals import (
     build_training_intervals,
     read_ranked_candidates,
-    source_record,
-    write_training_contract,
+    read_responsiveness,
+    write_training_data,
 )
 
 
@@ -1048,7 +1048,7 @@ def main() -> None:
         school_ids - permanent_exclusions,
         args.school_pair_distance,
     )
-    training_intervals, unresolved_intervals = build_training_intervals(
+    training_intervals, _ = build_training_intervals(
         training_candidates,
         explorer_indoor,
         {"smoke_overlap_school": overlap_ids, "fema_school": fema_ids},
@@ -1056,28 +1056,19 @@ def main() -> None:
         indoor_exclusions,
         outdoor_exclusions,
     )
-    interval_metadata = write_training_contract(
+    training_outdoor = read_histories(
+        outdoor_paths,
+        {int(row["outdoor_sensor_id"]) for row in training_intervals},
+    )
+    responsiveness_path = (
+        ROOT / "inputs" / "masked_pretraining" / "responsiveness" / "pair_responsiveness.csv"
+    )
+    training_counts = write_training_data(
         args.training_output_dir,
         training_intervals,
-        unresolved_intervals,
-        args.school_pair_distance,
-        {
-            "sensor_inventory": source_record(args.sensor_inventory),
-            "school_cohorts": [
-                source_record(args.school_smoke_overlap),
-                source_record(args.fema_school_sensors),
-            ],
-            "indoor_history": [source_record(path) for path in primary_indoor_paths],
-        },
-        [
-            source_record(path)
-            for path in (
-                *INDOOR_EXCLUSION_PATHS,
-                INDOOR_RANGE_EXCLUSIONS_PATH,
-                OUTDOOR_EXCLUSIONS_PATH,
-            )
-        ],
-        len(school_ids - permanent_exclusions),
+        explorer_indoor,
+        training_outdoor,
+        read_responsiveness(responsiveness_path) if responsiveness_path.is_file() else {},
     )
     paired_indoor_ids = {int(row["indoor_sensor_id"]) for row in all_pairs}
     unpaired_sensor_ids = (
@@ -1155,7 +1146,7 @@ def main() -> None:
         ],
         "outdoor_history": [str(path.resolve()) for path in primary_outdoor_paths],
         "review_outdoor_history": [str(path.resolve()) for path in review_paths],
-        "training_intervals": interval_metadata["counts"],
+        "training_intervals": training_counts,
     }
     inputs["history_explorer_locations"] = write_location_history_explorer(
         args.output_dir,

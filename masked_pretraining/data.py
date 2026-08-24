@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import random
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,45 +16,25 @@ from torch.utils.data import Dataset
 
 
 HOUR = 3600
-INTERVAL_COLUMNS = (
-    "assignment_id",
+TRAINING_COLUMNS = (
     "indoor_sensor_id",
-    "indoor_name",
     "outdoor_sensor_id",
-    "outdoor_name",
-    "distance_meters",
-    "candidate_rank",
     "start_utc",
     "end_utc",
-    "cohort_sources",
-    "selection_reason",
-)
-HISTORY_COLUMNS = ("time_stamp", "sensor_index", "pm2.5_atm")
-RESPONSIVENESS_COLUMNS = (
-    "indoor_sensor_id",
-    "outdoor_sensor_id",
     "responsiveness_tier",
+    "indoor_pm25",
+    "outdoor_pm25",
 )
-TRAINING_COHORT_SOURCES = {
-    "downloaded_history",
-    "fema_school",
-    "smoke_overlap_school",
-}
+RESPONSIVENESS_TIERS = {"high", "moderate", "low", "unclassified"}
 
 
 @dataclass(frozen=True)
 class TrainingInterval:
     assignment_id: str
     indoor_id: int
-    indoor_name: str
     outdoor_id: int
-    outdoor_name: str
-    distance_meters: float
-    candidate_rank: int
     start_time: int
     end_time: int
-    cohort_sources: str
-    selection_reason: str
 
 
 @dataclass(frozen=True)
@@ -70,14 +51,12 @@ class IntervalSelection:
 @dataclass(frozen=True)
 class HistoryData:
     values: dict[int, dict[int, float]]
-    files: tuple[Path, ...]
     row_count: int
 
 
 @dataclass(frozen=True)
 class IndoorSeries:
     indoor_id: int
-    indoor_name: str
     start_time: int
     values: np.ndarray
     allowed: np.ndarray
@@ -186,171 +165,73 @@ class PairWindowDataset(Dataset):
         }
 
 
-def load_training_intervals(
+def load_training_data(
     path: Path,
-    responsiveness_path: Path | None = None,
     responsiveness_tiers: set[str] | None = None,
-) -> IntervalSelection:
-    _require_file(path, "training interval CSV")
-    pair_tiers = _read_responsiveness(responsiveness_path) if responsiveness_tiers else {}
-    intervals, assignment_ids = [], set()
+) -> tuple[IntervalSelection, HistoryData]:
+    """Load the complete interval and PM2.5 contract from one CSV."""
+    _require_file(path, "masked-training CSV")
+    csv.field_size_limit(sys.maxsize)
+    records, assignment_ids = [], set()
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        _require_columns(reader.fieldnames, INTERVAL_COLUMNS, path)
+        _require_columns(reader.fieldnames, TRAINING_COLUMNS, path)
         for number, row in enumerate(reader, 2):
             try:
-                assignment_id = row["assignment_id"].strip()
                 indoor, outdoor = int(row["indoor_sensor_id"]), int(row["outdoor_sensor_id"])
-                distance, rank = float(row["distance_meters"]), int(row["candidate_rank"])
                 start, end = _timestamp(row["start_utc"]), _timestamp(row["end_utc"])
-                sources = row["cohort_sources"].strip()
-                expected_assignment = f"{indoor}-{outdoor}-{start}-{end}"
-                expected_reason = (
-                    "nearest_outdoor_sensor"
-                    if rank == 1
-                    else "fallback_due_to_exclusion"
-                )
+                tier = row["responsiveness_tier"].strip().lower()
+                assignment_id = f"{indoor}-{outdoor}-{start}-{end}"
                 if (
-                    not assignment_id
-                    or assignment_id != expected_assignment
-                    or assignment_id in assignment_ids
-                    or min(indoor, outdoor, rank) < 1
+                    assignment_id in assignment_ids
+                    or min(indoor, outdoor) < 1
                     or indoor == outdoor
-                    or distance < 0
-                    or not math.isfinite(distance)
                     or start >= end
-                    or not set(sources.split(";")) & TRAINING_COHORT_SOURCES
-                    or row["selection_reason"].strip() != expected_reason
+                    or tier not in RESPONSIVENESS_TIERS
                 ):
                     raise ValueError
+                indoor_values = _read_sparse_values(row["indoor_pm25"], start, end)
+                outdoor_values = _read_sparse_values(row["outdoor_pm25"], start, end)
             except (AttributeError, TypeError, ValueError) as error:
-                raise ValueError(f"invalid training interval row {number} in {path}") from error
+                raise ValueError(f"invalid masked-training row {number} in {path}") from error
             assignment_ids.add(assignment_id)
-            intervals.append(
-                TrainingInterval(
-                    assignment_id,
-                    indoor,
-                    row["indoor_name"].strip(),
-                    outdoor,
-                    row["outdoor_name"].strip(),
-                    distance,
-                    rank,
-                    start,
-                    end,
-                    sources,
-                    row["selection_reason"].strip(),
+            records.append(
+                (
+                    TrainingInterval(assignment_id, indoor, outdoor, start, end),
+                    tier,
+                    indoor_values,
+                    outdoor_values,
                 )
             )
-    if not intervals:
-        raise ValueError("training interval CSV contains no rows")
-    intervals.sort(key=lambda item: (item.indoor_id, item.start_time, item.end_time))
+    if not records:
+        raise ValueError("masked-training CSV contains no rows")
+    records.sort(key=lambda item: (item[0].indoor_id, item[0].start_time, item[0].end_time))
+    intervals = [record[0] for record in records]
     for previous, current in zip(intervals, intervals[1:]):
         if (
             previous.indoor_id == current.indoor_id
             and previous.end_time > current.start_time
         ):
-            raise ValueError(f"overlapping training intervals for indoor sensor {current.indoor_id}")
+            raise ValueError(
+                f"overlapping training intervals for indoor sensor {current.indoor_id}"
+            )
     indoor_count = len({item.indoor_id for item in intervals})
     if responsiveness_tiers:
-        selected = tuple(
-            item
-            for item in intervals
-            if pair_tiers.get((item.indoor_id, item.outdoor_id)) in responsiveness_tiers
-        )
-        filtered = len(intervals) - len(selected)
+        selected_records = [record for record in records if record[1] in responsiveness_tiers]
     else:
-        selected, filtered = tuple(intervals), 0
-    if not selected:
+        selected_records = records
+    if not selected_records:
         raise ValueError("no training intervals passed the responsiveness filter")
-    return IntervalSelection(selected, indoor_count, filtered)
-
-
-def load_interval_metadata(
-    metadata_path: Path,
-    interval_path: Path,
-    exclusion_paths: tuple[Path, ...],
-) -> dict[str, object]:
-    _require_file(metadata_path, "training interval metadata")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
-    if metadata.get("schema_version") not in {1, 2}:
-        raise ValueError("unsupported training interval metadata schema")
-    if metadata.get("manifest", {}).get("sha256") != file_sha256(interval_path):
-        raise ValueError("training interval manifest hash does not match its metadata")
-    recorded = sorted(
-        (Path(row["path"]).name, row["sha256"])
-        for row in metadata.get("exclusions", ())
+    values: dict[int, dict[int, float]] = {}
+    for interval, _, indoor_values, outdoor_values in selected_records:
+        _merge_values(values, interval.indoor_id, indoor_values)
+        _merge_values(values, interval.outdoor_id, outdoor_values)
+    selection = IntervalSelection(
+        tuple(record[0] for record in selected_records),
+        indoor_count,
+        len(records) - len(selected_records),
     )
-    current = sorted((path.name, file_sha256(path)) for path in exclusion_paths)
-    if recorded != current:
-        raise ValueError("training intervals are stale: reviewed exclusion hashes changed")
-    if metadata.get("schema_version") == 2:
-        packaged_history_path(metadata_path, metadata)
-    return metadata
-
-
-def packaged_history_path(
-    metadata_path: Path, metadata: dict[str, object]
-) -> Path:
-    record = metadata.get("history")
-    if not isinstance(record, dict) or not record.get("path") or not record.get("sha256"):
-        raise ValueError("training interval metadata has no packaged PM2.5 history")
-    recorded_path = Path(str(record["path"]))
-    path = metadata_path.parent / recorded_path.name
-    _require_file(path, "packaged PM2.5 history")
-    if file_sha256(path) != record["sha256"]:
-        raise ValueError("packaged PM2.5 history hash does not match its metadata")
-    return path
-
-
-def read_purpleair_history(roots: list[Path], sensor_ids: set[int]) -> HistoryData:
-    if not roots:
-        raise ValueError("at least one PurpleAir history path is required")
-    files: set[Path] = set()
-    for root in roots:
-        if root.is_file():
-            files.add(root)
-        elif root.is_dir():
-            files.update(
-                path
-                for path in root.rglob("*.csv")
-                if path.stem.split("_", 1)[0].isdigit()
-                and int(path.stem.split("_", 1)[0]) in sensor_ids
-            )
-        else:
-            raise FileNotFoundError(f"PurpleAir history path not found: {root}")
-    values = {sensor_id: {} for sensor_id in sensor_ids}
-    rows = 0
-    for path in sorted(files):
-        prefix = path.stem.split("_", 1)[0]
-        expected = int(prefix) if prefix.isdigit() else None
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            reader = csv.DictReader(source)
-            _require_columns(reader.fieldnames, HISTORY_COLUMNS, path)
-            for number, row in enumerate(reader, 2):
-                try:
-                    sensor_id = int(row["sensor_index"])
-                    if expected is not None and sensor_id != expected:
-                        raise ValueError
-                    if sensor_id not in sensor_ids:
-                        continue
-                    timestamp = int(row["time_stamp"])
-                    text = (row["pm2.5_atm"] or "").strip().lower()
-                    if text in {"", "null", "nan"}:
-                        continue
-                    value = float(text)
-                    if timestamp % HOUR or value < 0 or not math.isfinite(value):
-                        raise ValueError
-                except (TypeError, ValueError) as error:
-                    raise ValueError(f"invalid PurpleAir row {number} in {path}") from error
-                existing = values[sensor_id].get(timestamp)
-                if existing is not None and not math.isclose(existing, value, abs_tol=1e-6):
-                    raise ValueError(
-                        f"conflicting PurpleAir value for sensor {sensor_id} at "
-                        f"{timestamp} in {path}"
-                    )
-                values[sensor_id][timestamp] = value
-                rows += existing is None
-    return HistoryData(values, tuple(sorted(files)), rows)
+    return selection, HistoryData(values, sum(map(len, values.values())))
 
 
 def build_database(
@@ -400,7 +281,6 @@ def build_database(
         summaries.append(
             {
                 "indoor_sensor_id": indoor_id,
-                "indoor_name": intervals[0].indoor_name,
                 "training_intervals": len(intervals),
                 "assignment_ids": [item.assignment_id for item in intervals],
                 "outdoor_sensor_ids": sorted({item.outdoor_id for item in intervals}),
@@ -419,7 +299,6 @@ def build_database(
             series.append(
                 IndoorSeries(
                     indoor_id,
-                    intervals[0].indoor_name,
                     start,
                     values,
                     allowed,
@@ -462,34 +341,44 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def history_inventory_sha256(files: tuple[Path, ...]) -> str:
-    digest = hashlib.sha256()
-    for path in files:
-        stat = path.stat()
-        digest.update(f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
-    return digest.hexdigest()
+def _read_sparse_values(text: str, start: int, end: int) -> dict[int, float]:
+    values: dict[int, float] = {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, list):
+        raise ValueError
+    interval_hours = (end - start) // HOUR
+    for item in parsed:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError
+        offset, value = item
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or not 0 <= offset < interval_hours
+            or offset in values
+            or not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+            or not math.isfinite(value)
+        ):
+            raise ValueError
+        values[offset] = float(value)
+    return {start + offset * HOUR: value for offset, value in values.items()}
 
 
-def _read_responsiveness(path: Path | None) -> dict[tuple[int, int], str]:
-    if path is None:
-        raise ValueError("a responsiveness CSV is required when tiers are selected")
-    _require_file(path, "pair responsiveness CSV")
-    tiers, valid = {}, {"high", "moderate", "low", "unclassified"}
-    with path.open(encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        _require_columns(reader.fieldnames, RESPONSIVENESS_COLUMNS, path)
-        for number, row in enumerate(reader, 2):
-            try:
-                key = int(row["indoor_sensor_id"]), int(row["outdoor_sensor_id"])
-                tier = row["responsiveness_tier"].strip().lower()
-                if min(key) < 1 or key in tiers or tier not in valid:
-                    raise ValueError
-            except (TypeError, ValueError) as error:
-                raise ValueError(f"invalid or duplicate responsiveness row {number}") from error
-            tiers[key] = tier
-    if not tiers:
-        raise ValueError("pair responsiveness CSV contains no rows")
-    return tiers
+def _merge_values(
+    histories: dict[int, dict[int, float]],
+    sensor_id: int,
+    readings: dict[int, float],
+) -> None:
+    selected = histories.setdefault(sensor_id, {})
+    for timestamp, value in readings.items():
+        previous = selected.get(timestamp)
+        if previous is not None and not math.isclose(previous, value, abs_tol=1e-6):
+            raise ValueError(
+                f"conflicting PM2.5 value for sensor {sensor_id} at {timestamp}"
+            )
+        selected[timestamp] = value
 
 
 def _eligible_starts(

@@ -22,11 +22,7 @@ from .data import (
     PairWindowDataset,
     build_database,
     file_sha256,
-    history_inventory_sha256,
-    load_interval_metadata,
-    load_training_intervals,
-    packaged_history_path,
-    read_purpleair_history,
+    load_training_data,
     split_series,
 )
 from .diagnostics import (
@@ -42,26 +38,8 @@ from .models import ModelConfig, build_model, model_names
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_ROOT.parent
-INPUT_ROOT = REPOSITORY_ROOT / "inputs"
-DATA_ROOT = REPOSITORY_ROOT / "data"
-PURPLEAIR_DATA = DATA_ROOT / "purple air"
-MASKED_INPUTS = INPUT_ROOT / "masked_pretraining"
-EXCLUSIONS = DATA_ROOT / "exclusions"
-DEFAULT_INTERVALS = MASKED_INPUTS / "exclusion_aware" / "training_intervals.csv"
-DEFAULT_HISTORIES = (
-    PURPLEAIR_DATA / "all_indoor_pm25.csv",
-    PURPLEAIR_DATA / "all_outdoor_pm25.csv",
-)
-DEFAULT_EXCLUSIONS = (
-    EXCLUSIONS / "permanently_excluded_indoor_sensors.csv",
-    EXCLUSIONS / "excluded_indoor_sensors_pm25_gt1000.csv",
-    EXCLUSIONS / "excluded_indoor_schools_pm25_gt1000.csv",
-)
-DEFAULT_OUTDOOR_EXCLUSIONS = EXCLUSIONS / "excluded_outdoor_purpleair_ranges.csv"
-DEFAULT_INDOOR_RANGE_EXCLUSIONS = EXCLUSIONS / "excluded_indoor_purpleair_ranges.csv"
-DEFAULT_RESPONSIVENESS = (
-    MASKED_INPUTS / "responsiveness" / "pair_responsiveness.csv"
-)
+MASKED_INPUTS = REPOSITORY_ROOT / "inputs" / "masked_pretraining"
+DEFAULT_TRAINING_DATA = MASKED_INPUTS / "exclusion_aware" / "training_data.csv"
 DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "checkpoints" / "masked_pretraining.pt"
 
 
@@ -117,35 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--training-intervals", type=Path, default=DEFAULT_INTERVALS)
-    parser.add_argument(
-        "--interval-metadata",
-        type=Path,
-        help="Defaults to the training interval path with .meta.json suffix.",
-    )
-    parser.add_argument(
-        "--ignore-exclusions",
-        action="store_true",
-        help="Use an interval contract generated with an empty exclusion set.",
-    )
-    parser.add_argument(
-        "--history",
-        action="append",
-        type=Path,
-        help=(
-            "Repeatable PurpleAir hourly CSV or directory. Defaults to the packaged "
-            "training_history.csv; TEMPO files are unsupported."
-        ),
-    )
+    parser.add_argument("--training-data", type=Path, default=DEFAULT_TRAINING_DATA)
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--minimum-observed-hours", type=int, default=144)
     parser.add_argument("--stride-hours", type=int, default=24)
-    parser.add_argument(
-        "--responsiveness",
-        type=Path,
-        default=DEFAULT_RESPONSIVENESS,
-        help="Pair responsiveness CSV used when --responsiveness-tiers is set.",
-    )
     parser.add_argument(
         "--responsiveness-tiers",
         nargs="+",
@@ -157,8 +110,8 @@ def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "audit":
-        database, sources = _load_database(args)
-        report = _audit_report(database, sources)
+        database, _ = _load_database(args)
+        report = _audit_report(database)
         text = json.dumps(report, indent=2)
         print(text)
         if args.output:
@@ -176,7 +129,7 @@ def train(args: argparse.Namespace) -> None:
     )
     stage_epochs = _resolve_stage_epochs(args.epochs_per_stage, stages)
     _seed_everything(args.seed)
-    database, sources = _load_database(args)
+    database, training_data_sha256 = _load_database(args)
     train_indices, validation_indices = split_series(
         database, args.validation_fraction, args.seed
     )
@@ -220,7 +173,7 @@ def train(args: argparse.Namespace) -> None:
             database,
             train_indices,
             validation_indices,
-            sources,
+            training_data_sha256,
         )
         model.load_state_dict(resume["model_state"])
         if "optimizer_state" in resume:
@@ -238,7 +191,7 @@ def train(args: argparse.Namespace) -> None:
     metrics: list[dict[str, object]] = []
     diagnostics = diagnostic_paths(args.checkpoint)
     write_metrics(diagnostics.metrics, metrics)
-    audit = _audit_report(database, sources)
+    audit = _audit_report(database)
     print(
         f"device={device} model={args.model} train_sensors={len(train_indices)} "
         f"validation_sensors={len(validation_indices)} train_windows={len(train_data)} "
@@ -387,7 +340,7 @@ def train(args: argparse.Namespace) -> None:
                 for index in validation_indices
                 for assignment in database.series[index].assignment_ids
             ],
-            "sources": sources,
+            "training_data_sha256": training_data_sha256,
             "data_audit": audit,
             "seed": args.seed,
             "masking": {
@@ -485,38 +438,9 @@ def run_epoch(
 
 def _load_database(
     args: argparse.Namespace,
-) -> tuple[PairDatabase, dict[str, Any]]:
+) -> tuple[PairDatabase, str]:
     tiers = set(args.responsiveness_tiers or ())
-    metadata_path = args.interval_metadata or args.training_intervals.with_suffix(
-        ".meta.json"
-    )
-    exclusion_paths = () if args.ignore_exclusions else (
-        *DEFAULT_EXCLUSIONS,
-        DEFAULT_INDOOR_RANGE_EXCLUSIONS,
-        DEFAULT_OUTDOOR_EXCLUSIONS,
-    )
-    interval_metadata = load_interval_metadata(
-        metadata_path, args.training_intervals, exclusion_paths
-    )
-    packaged = not args.history and "history" in interval_metadata
-    histories = (
-        list(args.history)
-        if args.history
-        else [packaged_history_path(metadata_path, interval_metadata)]
-        if packaged
-        else list(DEFAULT_HISTORIES)
-    )
-    selection = load_training_intervals(
-        args.training_intervals,
-        args.responsiveness,
-        tiers,
-    )
-    sensor_ids = {
-        sensor_id
-        for interval in selection.intervals
-        for sensor_id in (interval.indoor_id, interval.outdoor_id)
-    }
-    history = read_purpleair_history(histories, sensor_ids)
+    selection, history = load_training_data(args.training_data, tiers)
     database = build_database(
         selection,
         history,
@@ -524,41 +448,18 @@ def _load_database(
         args.minimum_observed_hours,
         args.stride_hours,
     )
-    sources = {
-        "training_intervals": _source_record(args.training_intervals),
-        "interval_metadata": _source_record(metadata_path),
-        "interval_contract": interval_metadata,
-        "exclusions_applied": not args.ignore_exclusions,
-        "reviewed_exclusion_hashes_verified": not args.ignore_exclusions,
-        "responsiveness": (
-            {
-                **_source_record(args.responsiveness),
-                "included_tiers": sorted(tiers),
-            }
-            if tiers
-            else None
-        ),
-        "purpleair_history_roots": [str(path.resolve()) for path in histories],
-        "packaged_training_history": packaged,
-        "purpleair_history_file_count": len(history.files),
-        "purpleair_history_inventory_sha256": history_inventory_sha256(history.files),
-        "tempo_used": False,
-    }
-    return database, sources
+    return database, file_sha256(args.training_data)
 
 
-def _audit_report(
-    database: PairDatabase, sources: dict[str, Any]
-) -> dict[str, Any]:
+def _audit_report(database: PairDatabase) -> dict[str, Any]:
     available_indoor = sum(
         int(summary["indoor_observations"] > 0) for summary in database.sensor_summaries
     )
     available_outdoor = sum(
         int(summary["outdoor_observations"] > 0) for summary in database.sensor_summaries
     )
-    contract_counts = sources["interval_contract"]["counts"]
     return {
-        "interval_contract_sensors": database.selection.indoor_sensor_count,
+        "input_indoor_sensors": database.selection.indoor_sensor_count,
         "selected_indoor_sensors": len(database.selection.indoor_sensor_ids),
         "selected_training_intervals": len(database.selection.intervals),
         "intervals_removed_by_responsiveness": (
@@ -570,25 +471,15 @@ def _audit_report(
         "eligible_windows": database.window_count,
         "outdoor_handoffs": database.outdoor_handoff_count,
         "windows_crossing_outdoor_handoffs": database.windows_crossing_handoffs,
-        "hard_gap_intervals": contract_counts["unresolved_intervals"],
-        "hard_gap_hours": contract_counts["unresolved_hours"],
-        "indoor_exclusion_intervals": contract_counts["indoor_exclusion_intervals"],
-        "indoor_exclusion_hours": contract_counts["indoor_exclusion_hours"],
-        "unresolved_intervals": contract_counts["unresolved_intervals"],
-        "unresolved_hours": contract_counts["unresolved_hours"],
-        "unresolved_outdoor_intervals": contract_counts["unresolved_outdoor_intervals"],
-        "unresolved_outdoor_hours": contract_counts["unresolved_outdoor_hours"],
+        "hard_gap_hours": sum(
+            int(summary["hard_gap_hours"]) for summary in database.sensor_summaries
+        ),
         "history_rows_loaded": database.history.row_count,
         "history_hours": database.history_hours,
         "minimum_observed_hours_per_channel": database.minimum_observed_hours,
         "stride_hours": database.stride_hours,
-        "sources": sources,
         "sensors": list(database.sensor_summaries),
     }
-
-
-def _source_record(path: Path) -> dict[str, str]:
-    return {"path": str(path.resolve()), "sha256": file_sha256(path)}
 
 
 def _validate_training_arguments(args: argparse.Namespace) -> None:
@@ -631,7 +522,7 @@ def _validate_resume_checkpoint(
     database: PairDatabase,
     train_indices: list[int],
     validation_indices: list[int],
-    sources: dict[str, Any],
+    training_data_sha256: str,
 ) -> None:
     metadata = checkpoint["metadata"]
     expected = {
@@ -654,7 +545,7 @@ def _validate_resume_checkpoint(
             for index in validation_indices
             for assignment in database.series[index].assignment_ids
         ],
-        "sources": sources,
+        "training_data_sha256": training_data_sha256,
     }
     mismatches = [
         name for name, value in expected.items() if metadata.get(name) != value

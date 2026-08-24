@@ -42,7 +42,7 @@ different indoor operating conditions. Review the event graph before applying
 the generated sensor exclusion list.
 
 The permanent indoor training exclusions in
-`../permanently_excluded_indoor_sensors.csv` are a separate mandatory input.
+`../data/exclusions/permanently_excluded_indoor_sensors.csv` are a separate mandatory input.
 They are removed before PurpleAir histories or events are loaded. DSIS Room 2
 (sensor 112546) was added on August 22, 2026 after event review showed that its
 indoor channel was broken. PAPA JOE (sensor 71037) was excluded the same day
@@ -53,12 +53,12 @@ process rather than outdoor response. Their raw histories remain unchanged for
 provenance and sensor-quality auditing.
 
 Isolated reviewed indoor anomalies use bounded half-open UTC ranges in
-`../excluded_indoor_purpleair_ranges.csv` instead of whole-sensor exclusions.
+`../data/exclusions/excluded_indoor_purpleair_ranges.csv` instead of whole-sensor exclusions.
 Badger's Drift (sensor 106678) therefore excludes only its 1,256.5 ug/m3
 reading from 2021-08-31 04:00 UTC through 05:00 UTC.
 
 Known-bad outdoor readings are controlled by
-`../excluded_outdoor_purpleair_ranges.csv`. Each row identifies an outdoor
+`../data/exclusions/excluded_outdoor_purpleair_ranges.csv`. Each row identifies an outdoor
 sensor and a half-open UTC interval: `start_utc` is included and `end_utc` is
 excluded. Blank bounds mean the full downloaded history. The detector removes
 those readings before baselines, events, coverage, or sensor summaries are
@@ -145,12 +145,12 @@ From the `ag-transformer-model` repository root, use its virtual environment:
   --sensor-inventory ..\purple-air-pull\purpleair_continental_us_sensors.csv `
   --school-pair-distance 1000 `
   --include-downloaded-pairs `
-  --indoor-history ".\data\purple air\school_indoor_pm25.csv" `
-  --indoor-history ".\data\purple air\general_non_school_indoor_pm25.csv" `
-  --outdoor-history ".\data\purple air\outdoor_school\school_outdoor_pm25.csv" `
-  --outdoor-history ".\data\purple air\outdoor_non_school\non_school_outdoor_pm25.csv" `
-  --output-dir .\purpleair_pair_exclusions\results
+  --output-dir .\purpleair_pair_exclusions\results `
+  --training-output-dir .\inputs\masked_pretraining\exclusion_aware
 ```
+
+The consolidated all-sensor histories under `data/purple air` are the default
+indoor and outdoor histories.
 
 Both history directories use the existing hourly schema:
 
@@ -179,13 +179,10 @@ and is therefore out of scope for this detector. Also do not substitute the
 - `cohort_selection.csv`: all candidate sensors, their source membership,
   paired outdoor ID when available, and explicit unpaired status.
 - `selected_pairs.csv`: the explicit indoor/outdoor PurpleAir sensor join.
-- `training_intervals.csv`: deterministic half-open UTC assignments for school
-  masked training. One indoor sensor may have several adjacent outdoor
-  assignments, and outdoor sensors may be reused.
-- `training_intervals.meta.json`: schema version, matching radius, source and
-  reviewed-exclusion hashes, generation time, manifest hash, and counts.
-- `unresolved_training_intervals.csv`: indoor exclusion gaps and periods where
-  no eligible outdoor sensor exists. No training interval is emitted for them.
+- `inputs/masked_pretraining/exclusion_aware/training_data.csv`: the complete
+  masked-training input. Each row contains one deterministic half-open UTC
+  assignment, its responsiveness tier, and sparse indoor/outdoor PM2.5
+  readings. Excluded or unresolved periods appear only as gaps between rows.
 - `pair_coverage.csv`: the selected pair list plus availability and
   exact indoor/outdoor hourly overlap for every pair.
 - `events.csv`: every detected episode, its metrics, and its selection reason.
@@ -221,16 +218,37 @@ and is therefore out of scope for this detector. Also do not substitute the
   the view and `Entire history` clears the range. Drag horizontally across a
   chart and release to zoom into that time slice; `Reset zoom` returns to the
   UTC field range. A click without dragging still pins an exact hourly reading.
+  Double-click and hold the second click, then drag on either chart panel to
+  create a new hourly exclusion for that indoor or outdoor sensor. Existing
+  bounded ranges can be moved by dragging inside them or resized at either
+  edge; select a range to delete it. Undo and redo span sensor navigation.
+  `Save exclusion CSVs` requests explicit write access to the selected
+  directory and updates both range manifests. If the browser does not support
+  folder access, the indoor and outdoor export buttons download the two exact
+  replacement CSVs separately.
   Keep the generated `location_history_data` folder beside the HTML file;
   histories are loaded per location to avoid loading every sensor into browser
   memory at once.
 
-The tool never modifies a reviewed exclusion manifest or a checkpoint. Review
-`excluded_sensors.csv` separately. If a candidate is accepted, update the
-appropriate reviewed exclusion file and rerun this process; masked training
-will reject an older interval contract whose recorded exclusion hashes no
-longer match. Preserve the review date in `decision_date` and record one exact
-UTC batch timestamp in `added_at_utc` for every newly approved row.
+To enable the explorer's `Back up core data` button and last-verified-backup
+indicator, start its local-only server from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe .\serve_data_explorer.py
+```
+
+Open the printed `http://127.0.0.1:8766/location_history_explorer.html` address.
+The button is disabled when the HTML file is opened directly because a static
+page cannot run the repository backup utility. The server listens only on the
+local computer, and each successful click replaces the single `backups`
+snapshot after verification.
+
+The detector never modifies a reviewed exclusion manifest or a checkpoint;
+only an explicit explorer Save action can write to a user-selected directory.
+Review `excluded_sensors.csv` separately. After saving an accepted change,
+rerun this process to generate a new `training_data.csv`. Preserve the review
+date in `decision_date` and record one exact UTC batch timestamp in
+`added_at_utc` for every newly approved row.
 
 ## Tests
 

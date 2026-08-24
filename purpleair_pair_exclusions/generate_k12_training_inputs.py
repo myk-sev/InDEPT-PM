@@ -1,9 +1,8 @@
-"""Generate paired-PurpleAir training contracts for every retrieved indoor sensor."""
+"""Generate self-contained K-12 paired-PurpleAir masked-training inputs."""
 
 from __future__ import annotations
 
 import argparse
-import csv
 from pathlib import Path
 
 from purpleair_pair_exclusions.detect_pair_exclusions import (
@@ -16,7 +15,6 @@ from purpleair_pair_exclusions.detect_pair_exclusions import (
     read_fema_school_ids,
     read_histories,
     read_overlap_indoor_ids,
-    read_pairs,
 )
 from purpleair_pair_exclusions.outdoor_quality import (
     read_indoor_exclusions,
@@ -30,22 +28,8 @@ from purpleair_pair_exclusions.training_intervals import (
 )
 
 
-DEFAULT_INDOOR = (HISTORY_ROOT / "all_indoor_pm25.csv",)
-DEFAULT_OUTDOOR = (HISTORY_ROOT / "all_outdoor_pm25.csv",)
-
-
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument(
-        "--pairs",
-        type=Path,
-        default=ROOT.parent / "purple-air-pull" / "purpleair_continental_us_pairs.csv",
-    )
-    result.add_argument(
-        "--selected-pairs",
-        type=Path,
-        default=ROOT / "purpleair_pair_exclusions" / "results" / "selected_pairs.csv",
-    )
     result.add_argument(
         "--sensor-inventory",
         type=Path,
@@ -84,33 +68,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--output-root",
         type=Path,
-        default=ROOT / "inputs" / "masked_pretraining" / "all_sensors",
+        default=ROOT / "inputs" / "masked_pretraining",
     )
     return result
 
 
-def _pair(row: dict[str, object], rank: int = 1) -> dict[str, object]:
-    return {
-        "indoor_sensor_id": int(row["indoor_sensor_id"]),
-        "indoor_name": row["indoor_name"],
-        "outdoor_sensor_id": int(row["outdoor_sensor_id"]),
-        "outdoor_name": row["outdoor_name"],
-        "distance_meters": float(row["distance_meters"]),
-        "candidate_rank": rank,
-    }
-
-
-def _selected_pairs(path: Path) -> dict[int, dict[str, object]]:
-    with path.open(encoding="utf-8-sig", newline="") as source:
-        return {
-            int(row["indoor_sensor_id"]): row for row in csv.DictReader(source)
-        }
-
-
 def main() -> None:
     args = parser().parse_args()
-    indoor_paths = args.indoor_history or list(DEFAULT_INDOOR)
-    outdoor_paths = args.outdoor_history or list(DEFAULT_OUTDOOR)
+    indoor_paths = args.indoor_history or [HISTORY_ROOT / "all_indoor_pm25.csv"]
+    outdoor_paths = args.outdoor_history or [HISTORY_ROOT / "all_outdoor_pm25.csv"]
     indoor = read_histories(indoor_paths)
     outdoor = read_histories(outdoor_paths)
     retrieved_ids = set(indoor)
@@ -120,27 +86,7 @@ def main() -> None:
     candidates = read_ranked_candidates(
         args.sensor_inventory, school_ids, args.school_pair_distance
     )
-    snapshot = {
-        int(row["indoor_sensor_id"]): row for row in read_pairs(args.pairs)
-    }
-    replacements = _selected_pairs(args.selected_pairs)
-    for indoor_id in sorted(retrieved_ids - school_ids):
-        original = snapshot.get(indoor_id)
-        if original is None:
-            continue
-        choices = [_pair(original)]
-        replacement = replacements.get(indoor_id)
-        if replacement and int(replacement["outdoor_sensor_id"]) != int(
-            original["outdoor_sensor_id"]
-        ):
-            choices.append(_pair(replacement, 2))
-        candidates[indoor_id] = choices
-
-    cohorts = {
-        "smoke_overlap_school": overlap,
-        "fema_school": fema,
-        "downloaded_history": retrieved_ids,
-    }
+    cohorts = {"smoke_overlap_school": overlap, "fema_school": fema}
     responsiveness = read_responsiveness(args.responsiveness)
     excluded_indoor = set().union(
         *(read_excluded_sensor_ids(path) for path in INDOOR_EXCLUSION_PATHS)

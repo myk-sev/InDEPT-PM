@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import math
 import os
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,27 +16,21 @@ from purpleair_pair_exclusions.outdoor_quality import OutdoorExclusion
 HOUR = 3600
 EARTH_RADIUS_METERS = 6_371_008.8
 SENSOR_COLUMNS = ("sensor_index", "name", "location_type", "latitude", "longitude")
-INTERVAL_FIELDS = (
-    "assignment_id",
+TRAINING_FIELDS = (
     "indoor_sensor_id",
-    "indoor_name",
     "outdoor_sensor_id",
-    "outdoor_name",
-    "distance_meters",
-    "candidate_rank",
     "start_utc",
     "end_utc",
-    "cohort_sources",
-    "selection_reason",
+    "responsiveness_tier",
+    "indoor_pm25",
+    "outdoor_pm25",
 )
-UNRESOLVED_FIELDS = (
+RESPONSIVENESS_FIELDS = (
     "indoor_sensor_id",
-    "indoor_name",
-    "start_utc",
-    "end_utc",
-    "cohort_sources",
-    "reason",
+    "outdoor_sensor_id",
+    "responsiveness_tier",
 )
+RESPONSIVENESS_TIERS = {"high", "moderate", "low", "unclassified"}
 
 
 def read_ranked_candidates(
@@ -194,105 +188,80 @@ def build_training_intervals(
     return [_finalize(row) for row in intervals], [_finalize_gap(row) for row in unresolved]
 
 
-def write_training_contract(
+def write_training_data(
     output: Path,
     intervals: list[dict[str, object]],
-    unresolved: list[dict[str, object]],
-    matching_distance: float,
-    sources: dict[str, object],
-    exclusions: list[dict[str, str]],
-    candidate_sensor_count: int,
-) -> dict[str, object]:
+    indoor_history: dict[int, dict[int, float]],
+    outdoor_history: dict[int, dict[int, float]],
+    responsiveness: dict[tuple[int, int], str] | None = None,
+    filename: str = "training_data.csv",
+) -> dict[str, int]:
+    """Write one model-ready CSV containing intervals and their PM2.5 values."""
     if not intervals:
         raise ValueError("no static training intervals were generated")
     output.mkdir(parents=True, exist_ok=True)
-    interval_path = output / "training_intervals.csv"
-    unresolved_path = output / "unresolved_training_intervals.csv"
-    _write_csv(interval_path, INTERVAL_FIELDS, intervals)
-    _write_csv(unresolved_path, UNRESOLVED_FIELDS, unresolved)
-    by_indoor: dict[int, list[dict[str, object]]] = {}
+    rows, reading_count = [], 0
     for row in intervals:
-        by_indoor.setdefault(int(row["indoor_sensor_id"]), []).append(row)
-    handoffs = sum(
-        first["end_utc"] == second["start_utc"]
-        and first["outdoor_sensor_id"] != second["outdoor_sensor_id"]
-        for rows in by_indoor.values()
-        for first, second in zip(rows, rows[1:])
-    )
-    metadata = {
-        "schema_version": 1,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "interval_semantics": "start_utc inclusive; end_utc exclusive; exact UTC hours",
-        "matching_distance_meters": matching_distance,
-        "manifest": {
-            "path": str(interval_path.resolve()),
-            "sha256": file_sha256(interval_path),
-        },
-        "sources": sources,
-        "exclusions": exclusions,
-        "counts": {
-            "candidate_indoor_sensors": candidate_sensor_count,
-            "assigned_indoor_sensors": len(by_indoor),
-            "training_intervals": len(intervals),
-            "distinct_outdoor_sensors": len(
-                {int(row["outdoor_sensor_id"]) for row in intervals}
-            ),
-            "fallback_intervals": sum(
-                row["selection_reason"] == "fallback_due_to_exclusion"
-                for row in intervals
-            ),
-            "outdoor_handoffs": handoffs,
-            "unresolved_intervals": len(unresolved),
-            "unresolved_hours": sum(
-                (_timestamp(row["end_utc"]) - _timestamp(row["start_utc"])) // HOUR
-                for row in unresolved
-            ),
-            "indoor_exclusion_intervals": sum(
-                str(row["reason"]).startswith("indoor_") for row in unresolved
-            ),
-            "indoor_exclusion_hours": sum(
-                (_timestamp(row["end_utc"]) - _timestamp(row["start_utc"])) // HOUR
-                for row in unresolved
-                if str(row["reason"]).startswith("indoor_")
-            ),
-            "unresolved_outdoor_intervals": sum(
-                row["reason"] == "no_eligible_outdoor_sensor" for row in unresolved
-            ),
-            "unresolved_outdoor_hours": sum(
-                (_timestamp(row["end_utc"]) - _timestamp(row["start_utc"])) // HOUR
-                for row in unresolved
-                if row["reason"] == "no_eligible_outdoor_sensor"
-            ),
-        },
-    }
-    metadata_path = output / "training_intervals.meta.json"
-    _write_json(metadata_path, metadata)
-    return metadata
-
-
-def source_record(path: Path) -> dict[str, str]:
+        start, end = _timestamp(row["start_utc"]), _timestamp(row["end_utc"])
+        indoor_id = int(row["indoor_sensor_id"])
+        outdoor_id = int(row["outdoor_sensor_id"])
+        indoor_values = _compact_readings(indoor_history.get(indoor_id, {}), start, end)
+        outdoor_values = _compact_readings(outdoor_history.get(outdoor_id, {}), start, end)
+        reading_count += len(indoor_values) + len(outdoor_values)
+        rows.append(
+            {
+                "indoor_sensor_id": indoor_id,
+                "outdoor_sensor_id": outdoor_id,
+                "start_utc": row["start_utc"],
+                "end_utc": row["end_utc"],
+                "responsiveness_tier": (responsiveness or {}).get(
+                    (indoor_id, outdoor_id), "unclassified"
+                ),
+                "indoor_pm25": json.dumps(indoor_values, separators=(",", ":")),
+                "outdoor_pm25": json.dumps(outdoor_values, separators=(",", ":")),
+            }
+        )
+    _write_csv(output / filename, TRAINING_FIELDS, rows)
     return {
-        "path": str(path.resolve()),
-        "sha256": file_sha256(path) if path.is_file() else _directory_sha256(path),
+        "assigned_indoor_sensors": len(
+            {int(row["indoor_sensor_id"]) for row in intervals}
+        ),
+        "training_intervals": len(intervals),
+        "training_readings": reading_count,
     }
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def read_responsiveness(path: Path) -> dict[tuple[int, int], str]:
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        missing = set(RESPONSIVENESS_FIELDS) - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(f"missing responsiveness columns: {sorted(missing)}")
+        tiers: dict[tuple[int, int], str] = {}
+        for number, row in enumerate(reader, 2):
+            try:
+                key = int(row["indoor_sensor_id"]), int(row["outdoor_sensor_id"])
+                tier = row["responsiveness_tier"].strip().lower()
+                if min(key) < 1 or key in tiers or tier not in RESPONSIVENESS_TIERS:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(f"invalid responsiveness row {number}") from error
+            tiers[key] = tier
+    return tiers
 
 
-def _directory_sha256(path: Path) -> str:
-    if not path.is_dir():
-        raise FileNotFoundError(f"source path not found: {path}")
-    digest = hashlib.sha256()
-    for file in sorted(path.rglob("*.csv")):
-        digest.update(str(file.relative_to(path)).encode())
-        digest.update(file_sha256(file).encode())
-    return digest.hexdigest()
+def _compact_readings(
+    readings: dict[int, float], start: int, end: int
+) -> list[list[int | float]]:
+    result: list[list[int | float]] = []
+    for timestamp in sorted(readings):
+        if not start <= timestamp < end:
+            continue
+        value = float(readings[timestamp])
+        if timestamp % HOUR or value < 0 or not math.isfinite(value):
+            raise ValueError(f"invalid PM2.5 reading at {timestamp}")
+        result.append([(timestamp - start) // HOUR, value])
+    return result
 
 
 def _distance_meters(first: dict[str, object], second: dict[str, object]) -> float:
@@ -376,16 +345,12 @@ def _timestamp(value: object) -> int:
     return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
 
 
-def _write_csv(path: Path, fields: tuple[str, ...], rows: list[dict[str, object]]) -> None:
+def _write_csv(
+    path: Path, fields: tuple[str, ...], rows: Iterable[dict[str, object]]
+) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(temporary, path)
-
-
-def _write_json(path: Path, value: dict[str, object]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
