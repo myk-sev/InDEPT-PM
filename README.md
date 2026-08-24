@@ -108,8 +108,8 @@ Select either with `pm25_transformer.py train --model MODEL_NAME`. The original
 
 ## Delta model variants
 
-These models learn changes from the last indoor PM2.5 observation while still
-returning absolute PM2.5 predictions:
+These models learn hour-to-hour changes and cumulatively sum them from the last
+indoor PM2.5 observation while still returning absolute PM2.5 predictions:
 
 - `transformer-cyclical-delta`
 - `transformer-no-patches-cyclical-delta`
@@ -119,6 +119,11 @@ PatchTST also has cyclical-input versions:
 
 - `patchtst-cyclical`
 - `patchtst-cyclical-delta`
+
+The earlier horizon-wise format predicted every future hour as a separate
+offset from the last observation. Existing checkpoints retain that behavior
+under model names ending in `-absolute-delta`; train new `-delta` checkpoints
+from scratch for the step-delta format.
 
 ## Resume interrupted training
 
