@@ -15,6 +15,7 @@ class OutdoorExclusion:
     end: int | None
     reason: str
     sensor_name: str = ""
+    added_at_utc: str = ""
 
     def contains(self, timestamp: int) -> bool:
         return (self.start is None or timestamp >= self.start) and (
@@ -58,6 +59,7 @@ def _read_exclusions(
                     end,
                     row["reason"],
                     row.get("outdoor_name") or row.get("indoor_name") or "",
+                    row.get("added_at_utc", ""),
                 )
             )
     if not ranges:

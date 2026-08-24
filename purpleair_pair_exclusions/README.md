@@ -211,7 +211,9 @@ and is therefore out of scope for this detector. Also do not substitute the
   sensors` for downloaded indoor sensors that do not have a current pair. Use
   `Excluded sensors and ranges` for permanently excluded indoor sensors and
   outdoor sensors with reviewed exclusion ranges; the affected full history or
-  bounded periods are highlighted and labeled with the recorded reason. Its
+  bounded periods are highlighted and labeled with the recorded reason. The
+  `Recent-data exclusions` tab is the subset whose `added_at_utc` matches the
+  newest reviewed exclusion batch. Its
   searchable lists support names and sensor IDs. Previous/next arrow buttons
   review the active tab one location at a time. `K-12 locations only` filters
   each tab to indoor locations in the validated 119-sensor school cohort. Blank
@@ -227,7 +229,8 @@ The tool never modifies a reviewed exclusion manifest or a checkpoint. Review
 `excluded_sensors.csv` separately. If a candidate is accepted, update the
 appropriate reviewed exclusion file and rerun this process; masked training
 will reject an older interval contract whose recorded exclusion hashes no
-longer match.
+longer match. Preserve the review date in `decision_date` and record one exact
+UTC batch timestamp in `added_at_utc` for every newly approved row.
 
 ## Tests
 

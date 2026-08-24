@@ -20,7 +20,7 @@ HTML = r'''<!doctype html>
 </head>
 <body>
 <h1>PurpleAir location history explorer</h1>
-<nav class="pages" aria-label="History pages"><a id="pairedPage" href="#paired">Paired locations</a><a id="unpairedPage" href="#unpaired">Unpaired sensors</a><a id="excludedPage" href="#excluded">Excluded sensors and ranges</a></nav>
+<nav class="pages" aria-label="History pages"><a id="pairedPage" href="#paired">Paired locations</a><a id="reviewPage" href="#review">1 km review sensors</a><a id="recentPage" href="#recent">Recent-data exclusions</a><a id="unpairedPage" href="#unpaired">Unpaired sensors</a><a id="excludedPage" href="#excluded">Excluded sensors and ranges</a></nav>
 <div class="controls">
   <label class="location"><span id="locationLabel">Location</span><input id="location" type="search" list="locations" autocomplete="off" aria-describedby="locationHelp"></label>
   <datalist id="locations"></datalist>
@@ -44,10 +44,10 @@ HTML = r'''<!doctype html>
   <canvas id="overlay" aria-hidden="true"></canvas>
 </div>
 <script>
-const pairedLocations=__LOCATIONS__,unpairedLocations=__UNPAIRED_LOCATIONS__,excludedLocations=__EXCLUDED_LOCATIONS__;
-const locationInput=document.getElementById('location'),locationList=document.getElementById('locations'),locationLabel=document.getElementById('locationLabel'),locationHelp=document.getElementById('locationHelp'),startInput=document.getElementById('start'),endInput=document.getElementById('end'),k12Only=document.getElementById('k12Only'),resetZoom=document.getElementById('resetZoom'),previousLocation=document.getElementById('previousLocation'),nextLocation=document.getElementById('nextLocation'),status=document.getElementById('status'),error=document.getElementById('error'),quality=document.getElementById('quality'),outdoorLegend=document.getElementById('outdoorLegend'),indoorLegend=document.getElementById('indoorLegend'),invalidLegend=document.getElementById('invalidLegend'),reading=document.getElementById('reading'),chart=document.getElementById('chart'),overlay=document.getElementById('overlay'),pairedPage=document.getElementById('pairedPage'),unpairedPage=document.getElementById('unpairedPage'),excludedPage=document.getElementById('excludedPage');
+const pairedLocations=__LOCATIONS__,reviewLocations=__REVIEW_LOCATIONS__,recentExcludedLocations=__RECENT_EXCLUDED_LOCATIONS__,unpairedLocations=__UNPAIRED_LOCATIONS__,excludedLocations=__EXCLUDED_LOCATIONS__;
+const locationInput=document.getElementById('location'),locationList=document.getElementById('locations'),locationLabel=document.getElementById('locationLabel'),locationHelp=document.getElementById('locationHelp'),startInput=document.getElementById('start'),endInput=document.getElementById('end'),k12Only=document.getElementById('k12Only'),resetZoom=document.getElementById('resetZoom'),previousLocation=document.getElementById('previousLocation'),nextLocation=document.getElementById('nextLocation'),status=document.getElementById('status'),error=document.getElementById('error'),quality=document.getElementById('quality'),outdoorLegend=document.getElementById('outdoorLegend'),indoorLegend=document.getElementById('indoorLegend'),invalidLegend=document.getElementById('invalidLegend'),reading=document.getElementById('reading'),chart=document.getElementById('chart'),overlay=document.getElementById('overlay'),pairedPage=document.getElementById('pairedPage'),reviewPage=document.getElementById('reviewPage'),recentPage=document.getElementById('recentPage'),unpairedPage=document.getElementById('unpairedPage'),excludedPage=document.getElementById('excludedPage');
 let locations=[],page='',current=null,pendingLocation=null,visible=[],geometry=null,overlayContext=null,selectedTime=null,pinned=false,zoomStart=null,zoomEnd=null,drag=null;
-[pairedLocations,unpairedLocations,excludedLocations].forEach(items=>items.sort((a,b)=>a.label.localeCompare(b.label)));pairedPage.textContent=`Paired locations (${pairedLocations.length})`;unpairedPage.textContent=`Unpaired sensors (${unpairedLocations.length})`;excludedPage.textContent=`Excluded sensors and ranges (${excludedLocations.length})`;
+[pairedLocations,reviewLocations,recentExcludedLocations,unpairedLocations,excludedLocations].forEach(items=>items.sort((a,b)=>a.label.localeCompare(b.label)));pairedPage.textContent=`Paired locations (${pairedLocations.length})`;reviewPage.textContent=`1 km review sensors (${reviewLocations.length})`;recentPage.textContent=`Recent-data exclusions (${recentExcludedLocations.length})`;unpairedPage.textContent=`Unpaired sensors (${unpairedLocations.length})`;excludedPage.textContent=`Excluded sensors and ranges (${excludedLocations.length})`;
 function showError(message=''){error.textContent=message;error.hidden=!message}
 function utcInput(timestamp){return new Date(timestamp*1000).toISOString().slice(0,16)}
 function parseUtc(input){return input.value?Date.parse(`${input.value}Z`)/1000:null}
@@ -73,7 +73,7 @@ overlay.addEventListener('pointerdown',event=>{if(!geometry||event.button!==0)re
 overlay.addEventListener('pointermove',event=>{if(!geometry)return;if(!drag){if(!pinned)inspect(pointerTime(event));return}if(event.pointerId!==drag.pointerId)return;const xx=pointerX(event);drag.moved=drag.moved||Math.abs(xx-drag.startX)>=6;if(drag.moved)drawSelection(xx);else inspect(timeAtX(xx))});
 overlay.addEventListener('pointerup',event=>{if(!geometry||!drag||event.pointerId!==drag.pointerId)return;const completed=drag,xx=pointerX(event),moved=completed.moved||Math.abs(xx-completed.startX)>=6;drag=null;overlay.releasePointerCapture(event.pointerId);if(!moved){pinned=true;inspect(timeAtX(xx));return}const first=nearestIndex(visible,timeAtX(Math.min(completed.startX,xx))),last=nearestIndex(visible,timeAtX(Math.max(completed.startX,xx)));zoomStart=visible[Math.min(first,last)][0];zoomEnd=visible[Math.max(first,last)][0];selectedTime=zoomStart;pinned=false;draw()});
 overlay.addEventListener('pointercancel',()=>{drag=null;if(geometry)inspect(selectedTime??geometry.minTime)});overlay.addEventListener('pointerleave',()=>{if(geometry&&!drag&&!pinned){overlayContext.clearRect(0,0,geometry.width,geometry.height);reading.textContent='Move across the chart, click to pin a reading, or drag to zoom.'}});new ResizeObserver(()=>draw()).observe(chart.parentElement);matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
-function showPage(force=false){const hash=window.location.hash,next=hash==='#excluded'?'excluded':hash==='#unpaired'?'unpaired':'paired';if(next===page&&!force)return;page=next;const allLocations=page==='paired'?pairedLocations:page==='unpaired'?unpairedLocations:excludedLocations;locations=k12Only.checked?allLocations.filter(location=>location.k12):allLocations;current=null;pendingLocation=null;visible=[];geometry=null;locationInput.value='';locationList.replaceChildren();locations.forEach(location=>{const option=document.createElement('option');option.value=location.label;locationList.append(option)});const links={paired:pairedPage,unpaired:unpairedPage,excluded:excludedPage};Object.values(links).forEach(link=>link.removeAttribute('aria-current'));links[page].setAttribute('aria-current','page');locationLabel.textContent=page==='paired'?'Location':'Sensor';locationHelp.textContent=page==='paired'?'Search by location name or sensor ID. Use the arrow buttons to review locations one at a time. Blank dates show the entire available history. Drag across either chart and release to zoom; click without dragging to pin a reading.':page==='unpaired'?'Search by sensor ID or use the arrow buttons to review unpaired sensors one at a time. Blank dates show the entire available history; drag to zoom or click to pin a reading.':'Search by sensor name or ID. Use the arrow buttons to review excluded sensors one at a time. Highlighted periods are excluded from analysis and training.';outdoorLegend.hidden=page==='unpaired';indoorLegend.hidden=false;quality.hidden=true;invalidLegend.hidden=true;startInput.value=endInput.value='';status.textContent='';const empty=k12Only.checked?'No K-12 locations are available on this page.':page==='paired'?'No locations have both indoor and outdoor PurpleAir histories.':page==='unpaired'?'No unpaired sensors have downloaded indoor histories.':'No excluded sensors have downloaded histories.';reading.textContent=locations.length?'Select a sensor to inspect its readings.':empty;showError();updateNavigation();if(locations.length){locationInput.value=locations[0].label;loadLocation(locations[0])}else showError(empty)}
+function showPage(force=false){const hash=window.location.hash,next=hash==='#review'?'review':hash==='#recent'?'recent':hash==='#excluded'?'excluded':hash==='#unpaired'?'unpaired':'paired';if(next===page&&!force)return;page=next;const allLocations=page==='paired'?pairedLocations:page==='review'?reviewLocations:page==='recent'?recentExcludedLocations:page==='unpaired'?unpairedLocations:excludedLocations;locations=k12Only.checked?allLocations.filter(location=>location.k12):allLocations;current=null;pendingLocation=null;visible=[];geometry=null;locationInput.value='';locationList.replaceChildren();locations.forEach(location=>{const option=document.createElement('option');option.value=location.label;locationList.append(option)});const links={paired:pairedPage,review:reviewPage,recent:recentPage,unpaired:unpairedPage,excluded:excludedPage};Object.values(links).forEach(link=>link.removeAttribute('aria-current'));links[page].setAttribute('aria-current','page');locationLabel.textContent=['paired','review'].includes(page)?'Location':'Sensor';locationHelp.textContent=page==='review'?'Review only paired locations represented in the retained 1 km indoor/outdoor sources, including the isolated outdoor archive. Search by location name or sensor ID, or use the arrow buttons one location at a time.':page==='recent'?'These sensors have exclusion ranges added in the most recent reviewed data batch. Search by sensor name or ID; highlighted periods are excluded from analysis and training.':page==='paired'?'Search by location name or sensor ID. Use the arrow buttons to review locations one at a time. Blank dates show the entire available history. Drag across either chart and release to zoom; click without dragging to pin a reading.':page==='unpaired'?'Search by sensor ID or use the arrow buttons to review unpaired sensors one at a time. Blank dates show the entire available history; drag to zoom or click to pin a reading.':'Search by sensor name or ID. Use the arrow buttons to review excluded sensors one at a time. Highlighted periods are excluded from analysis and training.';outdoorLegend.hidden=page==='unpaired';indoorLegend.hidden=false;quality.hidden=true;invalidLegend.hidden=true;startInput.value=endInput.value='';status.textContent='';const empty=k12Only.checked?'No K-12 locations are available on this page.':page==='paired'?'No locations have both indoor and outdoor PurpleAir histories.':page==='review'?'No 1 km review sensors have paired histories.':page==='recent'?'No exclusions were added in the most recent reviewed data batch.':page==='unpaired'?'No unpaired sensors have downloaded indoor histories.':'No excluded sensors have downloaded histories.';reading.textContent=locations.length?'Select a sensor to inspect its readings.':empty;showError();updateNavigation();if(locations.length){locationInput.value=locations[0].label;loadLocation(locations[0])}else showError(empty)}
 window.addEventListener('hashchange',()=>showPage());showPage();
 </script>
 </body>
@@ -91,16 +91,40 @@ def write_location_history_explorer(
     | tuple[dict[str, object], ...] = (),
     indoor_exclusions: tuple[OutdoorExclusion, ...] = (),
     k12_sensor_ids: set[int] | tuple[int, ...] = (),
+    review_outdoor_ids: set[int] | tuple[int, ...] = (),
+    review_indoor_ids: set[int] | tuple[int, ...] = (),
 ) -> int:
     output.mkdir(parents=True, exist_ok=True)
     data_dir = output / "location_history_data"
     data_dir.mkdir(exist_ok=True)
-    locations, unpaired_locations, excluded_locations, expected_files = (
+    (
+        locations,
+        review_locations,
+        recent_locations,
+        unpaired_locations,
+        excluded_locations,
+        expected_files,
+    ) = (
+        [],
+        [],
         [],
         [],
         [],
         set(),
     )
+    latest_added_at = max(
+        (
+            exclusion.added_at_utc
+            for exclusion in (*indoor_exclusions, *outdoor_exclusions)
+            if exclusion.added_at_utc
+        ),
+        default="",
+    )
+    k12_outdoor_ids = {
+        int(pair["outdoor_sensor_id"])
+        for pair in pairs
+        if int(pair["indoor_sensor_id"]) in k12_sensor_ids
+    }
 
     def add_single(
         destination: list[dict[str, object]],
@@ -110,9 +134,9 @@ def write_location_history_explorer(
         sensor_name: str,
         values: dict[int, float],
         exclusions: tuple[OutdoorExclusion, ...] = (),
-    ) -> None:
+    ) -> dict[str, object] | None:
         if not values:
-            return
+            return None
         filename = f"{page}_{sensor_type}_{sensor_id}.js"
         data = {
             "paired": False,
@@ -139,18 +163,19 @@ def write_location_history_explorer(
         (data_dir / filename).write_text(
             f"window.__loadPurpleAirLocation({payload});\n", encoding="utf-8"
         )
-        destination.append(
-            {
-                "sensor_id": sensor_id,
-                "file": filename,
-                "k12": sensor_id in k12_sensor_ids,
-                "label": (
-                    f"{sensor_name} — {sensor_type} {sensor_id}"
-                    if sensor_name
-                    else f"{sensor_type.title()} sensor {sensor_id}"
-                ),
-            }
-        )
+        metadata = {
+            "sensor_id": sensor_id,
+            "file": filename,
+            "k12": sensor_id
+            in (k12_outdoor_ids if sensor_type == "outdoor" else k12_sensor_ids),
+            "label": (
+                f"{sensor_name} — {sensor_type} {sensor_id}"
+                if sensor_name
+                else f"{sensor_type.title()} sensor {sensor_id}"
+            ),
+        }
+        destination.append(metadata)
+        return metadata
 
     for pair in pairs:
         indoor_id = int(pair["indoor_sensor_id"])
@@ -188,16 +213,18 @@ def write_location_history_explorer(
         (data_dir / filename).write_text(
             f"window.__loadPurpleAirLocation({payload});\n", encoding="utf-8"
         )
-        locations.append(
-            {
-                "indoor_sensor_id": indoor_id,
-                "file": filename,
-                "k12": indoor_id in k12_sensor_ids,
-                "label": (
-                    f"{pair['indoor_name']} — indoor {indoor_id} / outdoor {outdoor_id}"
-                ),
-            }
-        )
+        location = {
+            "indoor_sensor_id": indoor_id,
+            "file": filename,
+            "k12": indoor_id in k12_sensor_ids,
+            "label": (
+                f"{pair['indoor_name']} ({float(pair['distance_meters']):.2f} m) — "
+                f"indoor {indoor_id} / outdoor {outdoor_id}"
+            ),
+        }
+        locations.append(location)
+        if indoor_id in review_indoor_ids or outdoor_id in review_outdoor_ids:
+            review_locations.append(location)
     for sensor_id in sorted(unpaired_sensor_ids):
         add_single(
             unpaired_locations,
@@ -225,7 +252,7 @@ def write_location_history_explorer(
         ranges_by_indoor.setdefault(exclusion.sensor_id, []).append(exclusion)
     for sensor_id, exclusions in sorted(ranges_by_indoor.items()):
         if sensor_id not in permanent_ids:
-            add_single(
+            metadata = add_single(
                 excluded_locations,
                 "excluded",
                 "indoor",
@@ -234,11 +261,15 @@ def write_location_history_explorer(
                 indoor.get(sensor_id, {}),
                 tuple(exclusions),
             )
+            if metadata and latest_added_at and any(
+                item.added_at_utc == latest_added_at for item in exclusions
+            ):
+                recent_locations.append(metadata)
     ranges_by_sensor: dict[int, list[OutdoorExclusion]] = {}
     for exclusion in outdoor_exclusions:
         ranges_by_sensor.setdefault(exclusion.sensor_id, []).append(exclusion)
     for sensor_id, exclusions in sorted(ranges_by_sensor.items()):
-        add_single(
+        metadata = add_single(
             excluded_locations,
             "excluded",
             "outdoor",
@@ -247,10 +278,20 @@ def write_location_history_explorer(
             outdoor.get(sensor_id, {}),
             tuple(exclusions),
         )
+        if metadata and latest_added_at and any(
+            item.added_at_utc == latest_added_at for item in exclusions
+        ):
+            recent_locations.append(metadata)
     for path in data_dir.glob("*.js"):
         if path.name not in expected_files:
             path.unlink()
     metadata = json.dumps(locations, separators=(",", ":")).replace("</", "<\\/")
+    review_metadata = json.dumps(
+        review_locations, separators=(",", ":")
+    ).replace("</", "<\\/")
+    recent_metadata = json.dumps(
+        recent_locations, separators=(",", ":")
+    ).replace("</", "<\\/")
     unpaired_metadata = json.dumps(
         unpaired_locations, separators=(",", ":")
     ).replace("</", "<\\/")
@@ -259,6 +300,10 @@ def write_location_history_explorer(
     ).replace("</", "<\\/")
     (output / "location_history_explorer.html").write_text(
         HTML.replace("__LOCATIONS__", metadata).replace(
+            "__REVIEW_LOCATIONS__", review_metadata
+        ).replace(
+            "__RECENT_EXCLUDED_LOCATIONS__", recent_metadata
+        ).replace(
             "__UNPAIRED_LOCATIONS__", unpaired_metadata
         ).replace("__EXCLUDED_LOCATIONS__", excluded_metadata),
         encoding="utf-8",

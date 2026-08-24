@@ -105,3 +105,8 @@ The default output directory is `purpleair_pair_exclusions/outdoor_quality_resul
 Candidate output is evidence for review, not an exclusion decision. Examine
 the candidate in `location_history_explorer.html`; only confirmed outdoor
 failures should be manually added to `excluded_outdoor_purpleair_ranges.csv`.
+Every added row records the local review date in `decision_date` and the exact
+UTC batch time in `added_at_utc`. Rerun this detector after approval to confirm
+the applied rows are no longer reported in
+`new_exclusion_range_candidates.csv`, then rerun the pair-exclusion workflow to
+refresh training intervals and both exclusion tabs in the data explorer.
