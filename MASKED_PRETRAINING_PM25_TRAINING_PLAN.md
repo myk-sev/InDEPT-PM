@@ -14,7 +14,8 @@ time features. TEMPO is reserved for later forecasting work.
 ## Static training assignments
 
 Training consumes only
-`inputs/masked_pretraining/exclusion_aware/training_data.csv`. Exclusion-aware
+`inputs/masked_pretraining/exclusion_aware/k12_exclusion_aware_masked_training_data.csv`.
+Exclusion-aware
 matching resolves all outdoor fallbacks before generation, and each interval
 row includes its indoor and outdoor PM2.5 readings. One time series and one
 train/validation split unit are built per indoor sensor. A 168-hour window may

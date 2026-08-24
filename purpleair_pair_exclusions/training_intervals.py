@@ -194,7 +194,8 @@ def write_training_data(
     indoor_history: dict[int, dict[int, float]],
     outdoor_history: dict[int, dict[int, float]],
     responsiveness: dict[tuple[int, int], str] | None = None,
-    filename: str = "training_data.csv",
+    *,
+    filename: str,
 ) -> dict[str, int]:
     """Write one model-ready CSV containing intervals and their PM2.5 values."""
     if not intervals:

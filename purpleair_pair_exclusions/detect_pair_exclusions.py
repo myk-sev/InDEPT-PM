@@ -1069,6 +1069,7 @@ def main() -> None:
         explorer_indoor,
         training_outdoor,
         read_responsiveness(responsiveness_path) if responsiveness_path.is_file() else {},
+        filename="k12_exclusion_aware_masked_training_data.csv",
     )
     paired_indoor_ids = {int(row["indoor_sensor_id"]) for row in all_pairs}
     unpaired_sensor_ids = (

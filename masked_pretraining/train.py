@@ -33,13 +33,21 @@ from .diagnostics import (
     write_reconstruction_examples,
 )
 from .masking import MASK_SENTINEL, STAGES, mask_batch
-from .models import ModelConfig, build_model, model_names
+from .models import (
+    DEFAULT_MODEL,
+    ModelConfig,
+    build_model,
+    canonical_model_name,
+    model_names,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_ROOT.parent
 MASKED_INPUTS = REPOSITORY_ROOT / "inputs" / "masked_pretraining"
-DEFAULT_TRAINING_DATA = MASKED_INPUTS / "exclusion_aware" / "training_data.csv"
+DEFAULT_TRAINING_DATA = (
+    MASKED_INPUTS / "exclusion_aware" / "k12_exclusion_aware_masked_training_data.csv"
+)
 DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "checkpoints" / "masked_pretraining.pt"
 
 
@@ -54,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = commands.add_parser("train", help="Run the masking curriculum.")
     _add_data_arguments(train)
-    train.add_argument("--model", choices=model_names(), default="transformer")
+    train.add_argument("--model", choices=model_names(), default=DEFAULT_MODEL)
     train.add_argument("--model-dim", type=int, default=64)
     train.add_argument("--layers", type=int, default=3)
     train.add_argument("--heads", type=int, default=4)
@@ -547,9 +555,13 @@ def _validate_resume_checkpoint(
         ],
         "training_data_sha256": training_data_sha256,
     }
-    mismatches = [
-        name for name, value in expected.items() if metadata.get(name) != value
-    ]
+    mismatches = []
+    for name, value in expected.items():
+        actual = metadata.get(name)
+        if name == "model_name" and isinstance(actual, str):
+            actual = canonical_model_name(actual)
+        if actual != value:
+            mismatches.append(name)
     if mismatches:
         raise ValueError(
             "resume checkpoint does not match the current training configuration: "

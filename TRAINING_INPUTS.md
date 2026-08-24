@@ -19,20 +19,28 @@ The repository keeps source data and model-ready inputs separate:
 
 - `inputs/old_training_data.csv` and `inputs/school_old_training_data.csv`:
   model-ready exports from the legacy forecasting pipeline.
-- `inputs/masked_pretraining/exclusion_aware/`: default K-12 contract.
-- `inputs/masked_pretraining/no_exclusions/`: opt-in K-12 exclusion-free contract.
-- `inputs/masked_pretraining/all_sensors/`: exclusion-aware and exclusion-free
-  contracts for every retrieved indoor history with a PurpleAir pair.
-- `inputs/masked_pretraining/old_non_masked_purpleair/`: contracts derived from
-  the legacy training-only PurpleAir observations.
+- `inputs/masked_pretraining/exclusion_aware/k12_exclusion_aware_masked_training_data.csv`:
+  default K-12 contract.
+- `inputs/masked_pretraining/no_exclusions/k12_no_exclusions_masked_training_data.csv`:
+  opt-in K-12 exclusion-free contract.
+- `inputs/masked_pretraining/exclusion_informed_finetuned/k12_exclusion_informed_finetuned_masked_training_data.csv`:
+  K-12 fine-tuning contract.
+- `inputs/masked_pretraining/all_sensors/`: descriptively named exclusion-aware,
+  exclusion-free, and fine-tuning contracts for every retrieved indoor history
+  with a PurpleAir pair.
+- `inputs/masked_pretraining/old_non_masked_purpleair/`: descriptively named
+  legacy-PurpleAir exclusion-aware and exclusion-free masked-training contracts.
 - `inputs/masked_pretraining/responsiveness/`: generation-time curriculum
   classification outputs.
 - `inputs/model_aware_training_balance/`: default destination for a generated
   legacy forecasting balance index.
 
-Each masked-pretraining dataset directory contains only `training_data.csv` as
-its model input. Every row contains an assignment interval, its embedded
-responsiveness tier, and sparse indoor/outdoor PM2.5 readings. No source data,
+Each masked-pretraining model input has a self-describing filename containing
+its cohort and exclusion policy, such as
+`k12_exclusion_aware_masked_training_data.csv` or
+`all_sensors_no_exclusions_masked_training_data.csv`. Every row contains an
+assignment interval, its embedded responsiveness tier, and sparse
+indoor/outdoor PM2.5 readings. No source data,
 exclusion manifest, metadata sidecar, or additional history file is required at
 training time.
 

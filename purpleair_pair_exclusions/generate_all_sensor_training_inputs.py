@@ -169,6 +169,7 @@ def main() -> None:
             indoor,
             outdoor,
             responsiveness,
+            filename=f"all_sensors_{name}_masked_training_data.csv",
         )
         print(
             f"{name}: {counts['assigned_indoor_sensors']} sensors, "

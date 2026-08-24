@@ -179,7 +179,8 @@ and is therefore out of scope for this detector. Also do not substitute the
 - `cohort_selection.csv`: all candidate sensors, their source membership,
   paired outdoor ID when available, and explicit unpaired status.
 - `selected_pairs.csv`: the explicit indoor/outdoor PurpleAir sensor join.
-- `inputs/masked_pretraining/exclusion_aware/training_data.csv`: the complete
+- `inputs/masked_pretraining/exclusion_aware/k12_exclusion_aware_masked_training_data.csv`:
+  the complete
   masked-training input. Each row contains one deterministic half-open UTC
   assignment, its responsiveness tier, and sparse indoor/outdoor PM2.5
   readings. Excluded or unresolved periods appear only as gaps between rows.
@@ -246,7 +247,8 @@ snapshot after verification.
 The detector never modifies a reviewed exclusion manifest or a checkpoint;
 only an explicit explorer Save action can write to a user-selected directory.
 Review `excluded_sensors.csv` separately. After saving an accepted change,
-rerun this process to generate a new `training_data.csv`. Preserve the review
+rerun this process to generate a new
+`k12_exclusion_aware_masked_training_data.csv`. Preserve the review
 date in `decision_date` and record one exact UTC batch timestamp in
 `added_at_utc` for every newly approved row.
 

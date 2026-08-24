@@ -8,7 +8,8 @@ forecasting model.
 ## Static data contract
 
 Masked training reads exactly one model input:
-`inputs/masked_pretraining/exclusion_aware/training_data.csv`. Each row contains
+`inputs/masked_pretraining/exclusion_aware/k12_exclusion_aware_masked_training_data.csv`.
+Each row contains
 one half-open UTC indoor/outdoor assignment interval, its responsiveness tier,
 and both sensors' PM2.5 readings for that interval. The readings are sparse JSON
 lists of `[hour_offset, value]`, where the offset is measured from `start_utc`.
@@ -30,7 +31,7 @@ Select a different generated dataset with one argument:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining audit `
-  --training-data C:\path\to\training_data.csv
+  --training-data C:\path\to\k12_no_exclusions_masked_training_data.csv
 ```
 
 Natural missing observations are not reconstruction targets and are governed
@@ -41,13 +42,13 @@ The default dataset is the exclusion-aware K-12 cohort. All-retrieved-sensor
 variants
 are stored under `inputs/masked_pretraining/all_sensors/exclusion_aware` and
 `inputs/masked_pretraining/all_sensors/no_exclusions`; select one by passing its
-`training_data.csv` to `--training-data`.
+descriptively named `*_masked_training_data.csv` to `--training-data`.
 
 ## Training
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
-  --model transformer
+  --model single-self-attention-encoder
 ```
 
 The curriculum advances after validation plateaus:
@@ -90,7 +91,8 @@ classified-only run:
 Omitting `--responsiveness-tiers` preserves every static interval. The audit
 and checkpoints record any intervals removed by responsiveness filtering.
 
-`--model transformer` and `--model gru` use the same reconstruction contract.
+`--model single-self-attention-encoder` and `--model gru` use the same
+reconstruction contract.
 Add an architecture by decorating a `ModelConfig -> nn.Module` builder with
 `register_model()` in `models.py`; it must return `[batch, time, 2]`. Future
 run artifacts are separated by type under `masked_pretraining/runs/`:
@@ -147,9 +149,12 @@ resumed, but begin the continuation with a fresh optimizer. Only resume
 checkpoints you trust because PyTorch checkpoint loading can execute serialized
 code.
 
+Checkpoints that record the former `transformer` model name remain resumable;
+new checkpoints use `single-self-attention-encoder`.
+
 ## Readiness check
 
 Run `.\.venv\Scripts\python.exe -m masked_pretraining audit` immediately before
 training. It reports selected indoor sensors, intervals, outdoor handoffs,
 windows crossing handoffs, hard gaps, and eligible windows using only the
-selected `training_data.csv`.
+selected `*_masked_training_data.csv`.
