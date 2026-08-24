@@ -25,6 +25,7 @@ from .data import (
     history_inventory_sha256,
     load_interval_metadata,
     load_training_intervals,
+    packaged_history_path,
     read_purpleair_history,
     split_series,
 )
@@ -81,7 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--heads", type=int, default=4)
     train.add_argument("--dropout", type=float, default=0.1)
     train.add_argument("--stages", nargs="+", choices=STAGES)
-    train.add_argument("--epochs-per-stage", type=int, default=20)
+    train.add_argument(
+        "--epochs-per-stage",
+        nargs="+",
+        type=int,
+        default=[20],
+        metavar="N",
+        help="One uniform epoch count or one count per selected stage.",
+    )
     train.add_argument("--patience", type=int, default=3)
     train.add_argument("--minimum-delta", type=float, default=1e-4)
     train.add_argument("--learning-rate", type=float, default=3e-4)
@@ -124,7 +132,10 @@ def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
         "--history",
         action="append",
         type=Path,
-        help="Repeatable PurpleAir hourly CSV or directory. TEMPO files are unsupported.",
+        help=(
+            "Repeatable PurpleAir hourly CSV or directory. Defaults to the packaged "
+            "training_history.csv; TEMPO files are unsupported."
+        ),
     )
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--minimum-observed-hours", type=int, default=144)
@@ -163,6 +174,7 @@ def train(args: argparse.Namespace) -> None:
     stages = args.stages or (
         [str(resume_metadata["stage"])] if resume_metadata else list(STAGES)
     )
+    stage_epochs = _resolve_stage_epochs(args.epochs_per_stage, stages)
     _seed_everything(args.seed)
     database, sources = _load_database(args)
     train_indices, validation_indices = split_series(
@@ -233,8 +245,8 @@ def train(args: argparse.Namespace) -> None:
         f"validation_windows={len(validation_data)}"
     )
     started = time.perf_counter()
-    estimated_total_epochs = len(stages) * args.epochs_per_stage
-    for stage_index, stage in enumerate(stages):
+    estimated_total_epochs = sum(stage_epochs)
+    for stage_index, (stage, epoch_count) in enumerate(zip(stages, stage_epochs)):
         continuing_stage = bool(
             resume_metadata and stage_index == 0 and stage == resume_metadata["stage"]
         )
@@ -256,7 +268,7 @@ def train(args: argparse.Namespace) -> None:
             if continuing_stage
             else None
         )
-        for epoch in range(1, args.epochs_per_stage + 1):
+        for epoch in range(1, epoch_count + 1):
             train_metrics = run_epoch(
                 model,
                 train_loader,
@@ -304,13 +316,13 @@ def train(args: argparse.Namespace) -> None:
                 }
             )
             if stop_early:
-                estimated_total_epochs -= args.epochs_per_stage - epoch
+                estimated_total_epochs -= epoch_count - epoch
             elapsed = time.perf_counter() - started
             estimated_remaining = elapsed / len(metrics) * (
                 estimated_total_epochs - len(metrics)
             )
             print(
-                f"stage={stage} epoch={epoch}/{args.epochs_per_stage} "
+                f"stage={stage} epoch={epoch}/{epoch_count} "
                 f"time_taken={format_duration(elapsed)} "
                 f"ETA={format_duration(estimated_remaining)} "
                 f"train_loss={train_metrics['loss']:.6f} "
@@ -474,7 +486,6 @@ def run_epoch(
 def _load_database(
     args: argparse.Namespace,
 ) -> tuple[PairDatabase, dict[str, Any]]:
-    histories = args.history or list(DEFAULT_HISTORIES)
     tiers = set(args.responsiveness_tiers or ())
     metadata_path = args.interval_metadata or args.training_intervals.with_suffix(
         ".meta.json"
@@ -486,6 +497,14 @@ def _load_database(
     )
     interval_metadata = load_interval_metadata(
         metadata_path, args.training_intervals, exclusion_paths
+    )
+    packaged = not args.history and "history" in interval_metadata
+    histories = (
+        list(args.history)
+        if args.history
+        else [packaged_history_path(metadata_path, interval_metadata)]
+        if packaged
+        else list(DEFAULT_HISTORIES)
     )
     selection = load_training_intervals(
         args.training_intervals,
@@ -520,6 +539,7 @@ def _load_database(
             else None
         ),
         "purpleair_history_roots": [str(path.resolve()) for path in histories],
+        "packaged_training_history": packaged,
         "purpleair_history_file_count": len(history.files),
         "purpleair_history_inventory_sha256": history_inventory_sha256(history.files),
         "tempo_used": False,
@@ -576,7 +596,6 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         "model_dim",
         "layers",
         "heads",
-        "epochs_per_stage",
         "patience",
         "batch_size",
     )
@@ -589,6 +608,19 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("learning_rate, weight_decay, and minimum_delta are invalid")
     if args.reconstruction_every_epochs < 0:
         raise ValueError("reconstruction_every_epochs cannot be negative")
+
+
+def _resolve_stage_epochs(values: list[int], stages: list[str]) -> list[int]:
+    if any(value < 1 for value in values):
+        raise ValueError("epochs_per_stage values must be positive")
+    if len(values) == 1:
+        return values * len(stages)
+    if len(values) != len(stages):
+        raise ValueError(
+            "--epochs-per-stage requires one value or one value per selected stage "
+            f"({len(stages)} stages selected; {len(values)} values supplied)"
+        )
+    return values
 
 
 def _validate_resume_checkpoint(

@@ -15,6 +15,7 @@ from masked_pretraining.data import (
     read_purpleair_history,
     split_series,
 )
+from purpleair_pair_exclusions.training_intervals import write_training_history
 
 
 START = 1_704_067_200
@@ -206,6 +207,28 @@ class DataTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "reviewed exclusion hashes changed"):
             load_interval_metadata(metadata, self.intervals, (exclusion,))
+
+    def test_packaged_history_contains_only_assigned_sensor_hours(self):
+        _write_intervals(self.intervals, (_interval(1, 2, 0, 12, 1),))
+        with self.intervals.open(encoding="utf-8", newline="") as source:
+            intervals = list(csv.DictReader(source))
+        path = self.root / "training_history.csv"
+        indoor = {
+            1: {START + hour * 3600: 1.0 for hour in range(-1, 13)},
+            3: {START: 3.0},
+        }
+        outdoor = {2: {START + hour * 3600: 2.0 for hour in range(-1, 13)}}
+
+        counts = write_training_history(path, intervals, indoor, outdoor)
+
+        with path.open(encoding="utf-8", newline="") as source:
+            rows = list(csv.DictReader(source))
+        self.assertEqual(counts, {"training_history_sensors": 2, "training_history_rows": 24})
+        self.assertEqual({int(row["sensor_index"]) for row in rows}, {1, 2})
+        self.assertEqual(
+            {int(row["time_stamp"]) for row in rows},
+            {START + hour * 3600 for hour in range(12)},
+        )
 
 
 def _interval(indoor, outdoor, start, end, rank, cohort="fema_school"):

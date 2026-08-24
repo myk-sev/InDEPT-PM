@@ -272,18 +272,34 @@ def load_interval_metadata(
 ) -> dict[str, object]:
     _require_file(metadata_path, "training interval metadata")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
-    if metadata.get("schema_version") != 1:
+    if metadata.get("schema_version") not in {1, 2}:
         raise ValueError("unsupported training interval metadata schema")
     if metadata.get("manifest", {}).get("sha256") != file_sha256(interval_path):
         raise ValueError("training interval manifest hash does not match its metadata")
-    recorded = {
-        str(Path(row["path"]).resolve()): row["sha256"]
+    recorded = sorted(
+        (Path(row["path"]).name, row["sha256"])
         for row in metadata.get("exclusions", ())
-    }
-    current = {str(path.resolve()): file_sha256(path) for path in exclusion_paths}
+    )
+    current = sorted((path.name, file_sha256(path)) for path in exclusion_paths)
     if recorded != current:
         raise ValueError("training intervals are stale: reviewed exclusion hashes changed")
+    if metadata.get("schema_version") == 2:
+        packaged_history_path(metadata_path, metadata)
     return metadata
+
+
+def packaged_history_path(
+    metadata_path: Path, metadata: dict[str, object]
+) -> Path:
+    record = metadata.get("history")
+    if not isinstance(record, dict) or not record.get("path") or not record.get("sha256"):
+        raise ValueError("training interval metadata has no packaged PM2.5 history")
+    recorded_path = Path(str(record["path"]))
+    path = metadata_path.parent / recorded_path.name
+    _require_file(path, "packaged PM2.5 history")
+    if file_sha256(path) != record["sha256"]:
+        raise ValueError("packaged PM2.5 history hash does not match its metadata")
+    return path
 
 
 def read_purpleair_history(roots: list[Path], sensor_ids: set[int]) -> HistoryData:

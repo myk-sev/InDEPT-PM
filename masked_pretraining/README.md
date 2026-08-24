@@ -71,6 +71,15 @@ The curriculum advances after validation plateaus:
 4. indoor cross-channel blocks with outdoor values visible;
 5. final 3-, 6-, and 12-hour indoor suffixes.
 
+`--epochs-per-stage` accepts either one value, applied uniformly to every
+selected stage, or one value per stage in `--stages` order. Without an explicit
+`--stages` list, the seven values follow the curriculum order above:
+
+```powershell
+.\.venv\Scripts\python.exe -m masked_pretraining train `
+  --epochs-per-stage 30 20 20 50 20 50 50
+```
+
 Each hour has the final eight-feature contract: normalized outdoor and indoor
 PM2.5 followed by daily, weekly, and annual sine-cosine time features. Natural
 gaps and artificially hidden values use `-9` in the affected PM2.5 value slot.
