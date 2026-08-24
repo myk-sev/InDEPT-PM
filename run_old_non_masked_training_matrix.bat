@@ -20,15 +20,13 @@ cd /d "%~dp0" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "TRAINER=pm25_transformer.py"
-set "PAIRS=data\legacy\purpleair_continental_us_pairs_thinned_20km.csv"
-set "INDOOR=..\purple-air-pull\purpleair_hourly_pm25_atm"
-set "OUTDOOR=..\purple-air-pull\tempo_pm25_sensor_match\tempo_pm25_indoor_sensors.csv"
-set "FORECASTS=naqfc_output"
+set "LINEAR_DATA=inputs\old_training_data.csv"
+set "CYCLICAL_DATA=inputs\old_training_data_cyclical.csv"
 set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
 set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
 set "INFERENCE_ROOT=inference\old_non_masked_matrix"
 
-for %%P in ("%PYTHON%" "%TRAINER%" "%PAIRS%" "%INDOOR%" "%OUTDOOR%" "%FORECASTS%" "%LINEAR_CACHE%" "%CYCLICAL_CACHE%") do (
+for %%P in ("%PYTHON%" "%TRAINER%" "%LINEAR_DATA%" "%CYCLICAL_DATA%" "%LINEAR_CACHE%" "%CYCLICAL_CACHE%") do (
     if not exist "%%~P" (
         echo Required path not found: %%~P
         goto :fail
@@ -58,19 +56,20 @@ exit /b 0
 set "MODEL=%~1"
 set "EPOCHS=%~2"
 set "CHECKPOINT=old-non-masked-%MODEL%-%EPOCHS%ep.pt"
+set "TRAINING_DATA=%LINEAR_DATA%"
 set "CACHE=%LINEAR_CACHE%"
-if not "%MODEL:cyclical=%"=="%MODEL%" set "CACHE=%CYCLICAL_CACHE%"
+if not "%MODEL:cyclical=%"=="%MODEL%" (
+    set "TRAINING_DATA=%CYCLICAL_DATA%"
+    set "CACHE=%CYCLICAL_CACHE%"
+)
 set "INFERENCE_DIR=%INFERENCE_ROOT%\%MODEL%\%EPOCHS%ep"
-echo Starting %MODEL%: epochs=%EPOCHS% patience=%EPOCHS% checkpoint=%CHECKPOINT%
+echo Starting %MODEL%: epochs=%EPOCHS% patience=%EPOCHS% data=%TRAINING_DATA% checkpoint=%CHECKPOINT%
 echo Inference examples: cache=%CACHE% output=%INFERENCE_DIR%
 if defined DRY_RUN exit /b 0
 
 %PYTHON% %TRAINER% train ^
     --model "%MODEL%" ^
-    --pairs "%PAIRS%" ^
-    --indoor-history "%INDOOR%" ^
-    --outdoor-history "%OUTDOOR%" ^
-    --forecast-root "%FORECASTS%" ^
+    --training-data "%TRAINING_DATA%" ^
     --epochs %EPOCHS% ^
     --early-stopping-patience %EPOCHS% ^
     --batch-size %BATCH_SIZE% ^
