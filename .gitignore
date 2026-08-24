@@ -3,6 +3,7 @@
 .env
 backups/
 __pycache__/
+test*
 *.py[cod]
 *.ps1
 *.pt

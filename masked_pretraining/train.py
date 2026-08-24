@@ -5,6 +5,7 @@ import json
 import os
 import random
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -194,6 +195,8 @@ def train(args: argparse.Namespace) -> None:
         f"validation_sensors={len(validation_indices)} train_windows={len(train_data)} "
         f"validation_windows={len(validation_data)}"
     )
+    started = time.perf_counter()
+    estimated_total_epochs = len(args.stages) * args.epochs_per_stage
     for stage_index, stage in enumerate(args.stages):
         best_loss = float("inf")
         best_state: dict[str, torch.Tensor] | None = None
@@ -223,13 +226,6 @@ def train(args: argparse.Namespace) -> None:
                 device,
                 validation_masks,
             )
-            print(
-                f"stage={stage} epoch={epoch}/{args.epochs_per_stage} "
-                f"train_loss={train_metrics['loss']:.6f} "
-                f"validation_loss={validation_metrics['loss']:.6f} "
-                f"indoor_rmse={validation_metrics['indoor_rmse']:.3f} "
-                f"outdoor_rmse={validation_metrics['outdoor_rmse']:.3f}"
-            )
             improved = validation_metrics["loss"] < best_loss - args.minimum_delta
             if improved:
                 best_loss = validation_metrics["loss"]
@@ -253,6 +249,21 @@ def train(args: argparse.Namespace) -> None:
                     ),
                     "improved_checkpoint": improved,
                 }
+            )
+            if stale_epochs >= args.patience:
+                estimated_total_epochs -= args.epochs_per_stage - epoch
+            elapsed = time.perf_counter() - started
+            estimated_remaining = elapsed / len(metrics) * (
+                estimated_total_epochs - len(metrics)
+            )
+            print(
+                f"stage={stage} epoch={epoch}/{args.epochs_per_stage} "
+                f"time_taken={format_duration(elapsed)} "
+                f"ETA={format_duration(estimated_remaining)} "
+                f"train_loss={train_metrics['loss']:.6f} "
+                f"validation_loss={validation_metrics['loss']:.6f} "
+                f"indoor_rmse={validation_metrics['indoor_rmse']:.3f} "
+                f"outdoor_rmse={validation_metrics['outdoor_rmse']:.3f}"
             )
             write_metrics(diagnostics.metrics, metrics)
             if (
@@ -584,6 +595,12 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 def math_sqrt(value: float) -> float:
     return float(np.sqrt(value))
+
+
+def format_duration(seconds: float) -> str:
+    hours, seconds = divmod(max(0, round(seconds)), 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 if __name__ == "__main__":
