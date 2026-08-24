@@ -1,57 +1,65 @@
-# School-pair masked PM2.5 pretraining
+# PurpleAir masked PM2.5 pretraining
 
 This package pretrains a history encoder by reconstructing deliberately hidden
 PurpleAir PM2.5 observations. It does not read TEMPO or NAQFC. TEMPO can be
 introduced later when the pretrained history encoder is transferred into the
 forecasting model.
 
-## Data contract
+## Static data contract
 
-The loader filters the original one-to-one PurpleAir pair table by the validated
-119-sensor indoor K-12 cohort. The current source table contains 43 genuine
-school indoor-outdoor pairs. It rejects the zero-distance school file whose
-"outdoor" IDs equal its indoor IDs because that file represents ambient grid
-coordinates, not outdoor PurpleAir sensors.
+Masked training reads
+`inputs/masked_pretraining/exclusion_aware/training_intervals.csv`. Each half-open UTC
+interval assigns one indoor sensor to one outdoor PurpleAir sensor. The
+matching process resolves distance ranking, reviewed exclusions, fallback
+selection, and restoration of the closer sensor before training begins.
+`selected_pairs.csv` remains a diagnostic output and is not a training input.
 
-The permanent broken-sensor list, `permanently_excluded_indoor_sensors.csv`,
-and both prior high-reading lists, `excluded_indoor_sensors_pm25_gt1000.csv`
-and `school_indoor_pm25/data/excluded_indoor_schools_pm25_gt1000.csv`, are
-always applied before histories, windows, splits, or normalization. Their
-SHA-256 values are stored in every checkpoint manifest. Additional exclusion
-files can be supplied with repeated `--excluded-sensors` options.
+The required `training_intervals.meta.json` sidecar records the manifest hash,
+matching radius, inputs, and all reviewed exclusion-file hashes. Training fails
+when the manifest hash is wrong or any reviewed exclusion file has changed.
+Rerun the exclusion-aware matching process to refresh a stale contract.
 
-Known-bad outdoor PurpleAir periods in
-`excluded_outdoor_purpleair_ranges.csv` are also mandatory. The loader removes
-only readings inside each half-open UTC range before paired histories, windows,
-splits, or normalization are built; a blank start and end excludes that outdoor
-sensor's full downloaded history. Indoor sensors paired with these devices
-remain valid.
-
-Bounded indoor bad-reading periods in `excluded_indoor_purpleair_ranges.csv`
-are removed with the same half-open UTC semantics, while valid readings from
-those sensors remain available.
+The loader builds one continuous series for each indoor sensor. Adjacent
+outdoor assignments are stitched, so a 168-hour window may cross an outdoor
+sensor handoff. A manifest gap is a hard boundary, and a window can never
+contain more than one indoor sensor ID. Outdoor sensor and assignment IDs are
+retained per hour for audit provenance but are not model inputs.
 
 Each history CSV must contain `time_stamp,sensor_index,pm2.5_atm`. Directories
-are scanned recursively for numeric sensor-named CSVs. Pass indoor and outdoor
-history collections with repeated `--history` options:
+are scanned recursively for numeric sensor-named CSVs. The defaults contain all
+retrieved school and non-school sensors:
+
+- `data/purple air/all_indoor_pm25.csv`
+- `data/purple air/all_outdoor_pm25.csv`
+
+Override the interval contract or histories when needed:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining audit `
+  --training-intervals C:\path\to\training_intervals.csv `
   --history C:\path\to\school_indoor_purpleair `
   --history C:\path\to\school_outdoor_purpleair
 ```
 
-The audit reports observations and eligible windows for every pair. Training
-requires at least two pairs with 168-hour windows and, by default, at least 144
-observed hours in each channel. Natural gaps remain missing and are never
-reconstruction targets.
+The metadata path defaults to `training_intervals.meta.json` beside the CSV and
+can be overridden with `--interval-metadata`. Natural missing observations
+inside an assignment remain missing. They are not reconstruction targets and
+are governed by `--minimum-observed-hours`, which defaults to 144 observations
+per channel in each 168-hour window.
+
+An intentionally exclusion-free contract has an empty `exclusions` list in its
+metadata and must be selected explicitly with `--ignore-exclusions`. This keeps
+it separate from the default exclusion-aware input.
+
+The default interval contract is the K-12 cohort. All-retrieved-sensor variants
+are stored under `inputs/masked_pretraining/all_sensors/exclusion_aware` and
+`inputs/masked_pretraining/all_sensors/no_exclusions`; select either with
+`--training-intervals`, adding `--ignore-exclusions` for the latter.
 
 ## Training
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
-  --history C:\path\to\school_indoor_purpleair `
-  --history C:\path\to\school_outdoor_purpleair `
   --model transformer
 ```
 
@@ -63,42 +71,68 @@ The curriculum advances after validation plateaus:
 4. indoor cross-channel blocks with outdoor values visible;
 5. final 3-, 6-, and 12-hour indoor suffixes.
 
-Input features are normalized outdoor/indoor values, visible-value indicators,
-artificial-mask indicators, and daily/weekly/annual sine-cosine time features.
-Only deliberately hidden known values contribute to loss. Pair-level splitting
-holds out entire schools, and normalization is fitted only on training pairs.
+Each hour has the final eight-feature contract: normalized outdoor and indoor
+PM2.5 followed by daily, weekly, and annual sine-cosine time features. Natural
+gaps and artificially hidden values use `-9` in the affected PM2.5 value slot.
+The artificial target mask remains outside the model, so only deliberately
+hidden known values contribute to loss. Splitting is by `indoor_sensor_id`, and
+normalization is fitted only on training sensors.
 
-The post-exclusion responsiveness classifier can stage pair difficulty without
-adding a fixed building label to the model. Its join uses the exact indoor and
-outdoor sensor IDs. Start with the highest-response third, then add the middle
-and lowest thirds:
+The optional responsiveness curriculum classifies indoor/outdoor assignments.
+A window is admitted only if every assignment it touches has an included tier;
+missing classifications remain `unclassified` and are not admitted by a
+classified-only run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
-  --history ".\data\purple air\school_indoor_pm25.csv" `
-  --history ".\data\purple air\general_non_school_indoor_pm25.csv" `
-  --history ".\data\purple air\outdoor_school\school_outdoor_pm25.csv" `
-  --history ".\data\purple air\outdoor_non_school\non_school_outdoor_pm25.csv" `
   --responsiveness-tiers high
 
 # Later stages use: --responsiveness-tiers high moderate
 # Final classified stage: --responsiveness-tiers high moderate low
 ```
 
-Omitting `--responsiveness-tiers` preserves the unfiltered pair set. Filtered
-runs exclude `unclassified` pairs and record the classifier path, SHA-256,
-included tiers, and removed-pair count in the audit/checkpoint provenance.
+Omitting `--responsiveness-tiers` preserves every static interval. The audit
+and checkpoints record any intervals removed by responsiveness filtering.
 
 `--model transformer` and `--model gru` use the same reconstruction contract.
-Add another architecture by decorating a `ModelConfig -> nn.Module` builder with
-`register_model()` in `models.py`; the module must return `[batch, time, 2]`.
-Stage checkpoints and JSON provenance manifests are written under
-`masked_pretraining/runs/` by default.
+Add an architecture by decorating a `ModelConfig -> nn.Module` builder with
+`register_model()` in `models.py`; it must return `[batch, time, 2]`. Future
+run artifacts are separated by type under `masked_pretraining/runs/`:
 
-## Current data gate
+- `checkpoints/`: stage/final model checkpoints and JSON provenance manifests;
+- `graphs/`: metrics CSV files and loss-curve graphs;
+- `inference/`: validation reconstruction inference graphs.
 
-The available PurpleAir history archive contains the school indoor sensors but
-none of the paired outdoor sensor IDs. The default audit therefore reports zero
-trainable paired windows. Outdoor PurpleAir histories must be acquired before a
-real training run; the code intentionally does not replace them with TEMPO or
-duplicate indoor readings.
+Each run writes:
+
+- `<run>.metrics.csv`: one row per epoch with training and validation
+  loss, validation RMSE by channel, target counts, and checkpoint improvement;
+- `<run>.loss_curve.png`: training and validation loss across all
+  completed curriculum stages;
+- `<run>.reconstruction_examples.png`: four fixed validation windows
+  showing the full label history, model-visible history, artificially masked
+  labels, predictions, and natural missingness as gaps.
+
+The CSV is refreshed after every epoch. Both plots are refreshed from the best
+validation checkpoint after each completed masking stage, and their absolute
+paths are stored in the checkpoint JSON.
+
+To refresh the reconstruction plot during a stage, set an epoch interval:
+
+```powershell
+.\.venv\Scripts\python.exe -m masked_pretraining train `
+  --stages points `
+  --reconstruction-every-epochs 5
+```
+
+This uses the same fixed validation windows and mask pattern every time, making
+changes between epochs directly comparable. The interval resets at the start
+of each masking stage. The default `0` disables periodic reconstruction while
+retaining the best-checkpoint plot at the end of every stage.
+
+## Readiness check
+
+Run `.\.venv\Scripts\python.exe -m masked_pretraining audit` immediately before
+training. It reports selected indoor sensors, intervals, outdoor handoffs,
+windows crossing handoffs, hard gaps, unresolved periods, and eligible windows
+using only the static interval contract and consolidated PurpleAir histories.

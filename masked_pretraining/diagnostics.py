@@ -45,10 +45,15 @@ class DiagnosticPaths:
 
 def diagnostic_paths(checkpoint: Path) -> DiagnosticPaths:
     base = checkpoint.with_suffix("") if checkpoint.suffix else checkpoint
+    run_directory = (
+        checkpoint.parent.parent
+        if checkpoint.parent.name == "checkpoints"
+        else checkpoint.parent
+    )
     return DiagnosticPaths(
-        base.with_name(base.name + ".metrics.csv"),
-        base.with_name(base.name + ".loss_curve.png"),
-        base.with_name(base.name + ".reconstruction_examples.png"),
+        run_directory / "graphs" / f"{base.name}.metrics.csv",
+        run_directory / "graphs" / f"{base.name}.loss_curve.png",
+        run_directory / "inference" / f"{base.name}.reconstruction_examples.png",
     )
 
 

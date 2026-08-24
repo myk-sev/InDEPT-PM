@@ -58,7 +58,7 @@ DEFAULT_INDOOR_RANGE_EXCLUSIONS = EXCLUSIONS / "excluded_indoor_purpleair_ranges
 DEFAULT_RESPONSIVENESS = (
     MASKED_INPUTS / "responsiveness" / "pair_responsiveness.csv"
 )
-DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "masked_pretraining.pt"
+DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "checkpoints" / "masked_pretraining.pt"
 
 
 def build_parser() -> argparse.ArgumentParser:
