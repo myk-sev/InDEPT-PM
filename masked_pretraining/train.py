@@ -34,10 +34,12 @@ from .diagnostics import (
 )
 from .masking import (
     ALL_STAGES,
+    MASKING_ALGORITHM_VERSION,
     MASK_SENTINEL,
     STAGES,
     TEMPO_BRIDGE_MISSING_FRACTIONS,
     TEMPO_BRIDGE_STAGES,
+    apply_mask,
     mask_batch,
 )
 from .models import (
@@ -100,11 +102,37 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--validation-fraction", type=float, default=0.2)
     train.add_argument("--workers", type=int, default=0)
     train.add_argument(
+        "--torch-threads",
+        type=int,
+        default=0,
+        help="CPU threads used by PyTorch masking operations; 0 keeps the PyTorch default.",
+    )
+    train.add_argument(
         "--reconstruction-every-epochs",
         type=int,
         default=0,
         metavar="N",
         help="Refresh validation reconstructions every N stage epochs; 0 disables.",
+    )
+    train.add_argument(
+        "--reconstruction-output",
+        type=Path,
+        help="Write validation reconstruction graphs to this path.",
+    )
+    train.add_argument(
+        "--loss-curve-output",
+        type=Path,
+        help="Write the training and validation loss graph to this path.",
+    )
+    train.add_argument(
+        "--skip-metrics-csv",
+        action="store_true",
+        help="Do not write the per-epoch metrics CSV.",
+    )
+    train.add_argument(
+        "--final-checkpoint-only",
+        action="store_true",
+        help="Keep one rolling checkpoint without stage copies or JSON sidecars.",
     )
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", default="auto")
@@ -146,6 +174,9 @@ def main(argv: list[str] | None = None) -> None:
 
 def train(args: argparse.Namespace) -> None:
     _validate_training_arguments(args)
+    if args.torch_threads:
+        torch.set_num_threads(args.torch_threads)
+    args.torch_threads = torch.get_num_threads()
     resume = _load_checkpoint(args.resume) if args.resume else None
     resume_metadata = resume["metadata"] if resume else None
     stages = _resolve_training_stages(args, resume_metadata)
@@ -211,20 +242,30 @@ def train(args: argparse.Namespace) -> None:
         else []
     )
     metrics: list[dict[str, object]] = []
-    diagnostics = diagnostic_paths(args.checkpoint)
-    write_metrics(diagnostics.metrics, metrics)
+    diagnostics = diagnostic_paths(
+        args.checkpoint,
+        args.reconstruction_output,
+        args.loss_curve_output,
+        args.skip_metrics_csv,
+    )
+    if diagnostics.metrics:
+        write_metrics(diagnostics.metrics, metrics)
     audit = _audit_report(database)
     print(
         f"device={device} model={args.model} train_sensors={len(train_indices)} "
         f"validation_sensors={len(validation_indices)} train_windows={len(train_data)} "
-        f"validation_windows={len(validation_data)}"
+        f"validation_windows={len(validation_data)} torch_threads={args.torch_threads}"
     )
     started = time.perf_counter()
     estimated_total_epochs = sum(stage_epochs)
     for stage_index, (stage, epoch_count) in enumerate(zip(stages, stage_epochs)):
         stage_number = ALL_STAGES.index(stage) + 1
         continuing_stage = bool(
-            resume_metadata and stage_index == 0 and stage == resume_metadata["stage"]
+            resume_metadata
+            and stage_index == 0
+            and stage == resume_metadata["stage"]
+            and (resume_metadata.get("masking") or {}).get("algorithm_version")
+            == MASKING_ALGORITHM_VERSION
         )
         best_loss = (
             float(resume_metadata["validation_metrics"]["loss"])
@@ -239,6 +280,7 @@ def train(args: argparse.Namespace) -> None:
         training_masks = torch.Generator().manual_seed(
             args.seed + stage_number * 10_000
         )
+        validation_target_masks: list[torch.Tensor] = []
         best_metrics = (
             dict(resume_metadata["validation_metrics"])
             if continuing_stage
@@ -264,6 +306,7 @@ def train(args: argparse.Namespace) -> None:
                 normalizer,
                 device,
                 validation_masks,
+                target_mask_cache=validation_target_masks,
             )
             improved = validation_metrics["loss"] < best_loss - args.minimum_delta
             if improved:
@@ -306,7 +349,8 @@ def train(args: argparse.Namespace) -> None:
                 f"indoor_rmse={validation_metrics['indoor_rmse']:.3f} "
                 f"outdoor_rmse={validation_metrics['outdoor_rmse']:.3f}"
             )
-            write_metrics(diagnostics.metrics, metrics)
+            if diagnostics.metrics:
+                write_metrics(diagnostics.metrics, metrics)
             write_loss_curve(diagnostics.loss_curve, metrics)
             if (
                 args.reconstruction_every_epochs
@@ -325,9 +369,10 @@ def train(args: argparse.Namespace) -> None:
                 )
             if stop_early:
                 break
-        if best_state is None or best_metrics is None:
+        if best_state is None or best_optimizer_state is None or best_metrics is None:
             raise RuntimeError(f"stage {stage} produced no valid checkpoint")
         model.load_state_dict(best_state)
+        optimizer.load_state_dict(best_optimizer_state)
         if stage not in completed:
             completed.append(stage)
         write_reconstruction_examples(
@@ -366,10 +411,18 @@ def train(args: argparse.Namespace) -> None:
             "training_data_sha256": training_data_sha256,
             "data_audit": audit,
             "seed": args.seed,
+            "validation_split": {
+                "strategy": "representative_sensor_groups_v1",
+                "requested_fraction": args.validation_fraction,
+                "train_windows": len(train_data),
+                "validation_windows": len(validation_data),
+            },
             "masking": {
+                "algorithm_version": MASKING_ALGORITHM_VERSION,
                 "sentinel": MASK_SENTINEL,
                 "natural_missing_uses_sentinel": True,
                 "target_mask_is_model_input": False,
+                "validation_target_masks_cached": True,
                 "outdoor_availability_is_derived_input": bool(
                     getattr(model, "outdoor_availability", False)
                 ),
@@ -388,7 +441,9 @@ def train(args: argparse.Namespace) -> None:
                 },
             },
             "diagnostics": {
-                "metrics_csv": str(diagnostics.metrics.resolve()),
+                "metrics_csv": (
+                    str(diagnostics.metrics.resolve()) if diagnostics.metrics else None
+                ),
                 "loss_curve_png": str(diagnostics.loss_curve.resolve()),
                 "reconstruction_examples_png": str(
                     diagnostics.reconstructions.resolve()
@@ -399,6 +454,7 @@ def train(args: argparse.Namespace) -> None:
                 "resumed_from": str(args.resume.resolve()) if args.resume else None,
                 "optimizer_state_resumed": optimizer_resumed,
                 "epochs_completed_this_run": len(metrics),
+                "torch_threads": args.torch_threads,
             },
             "transfer": {
                 "retain_parameter_prefixes": ["input_projection.", "position", "encoder."],
@@ -415,10 +471,19 @@ def train(args: argparse.Namespace) -> None:
                 ],
             },
         }
-        stage_checkpoint = _stage_checkpoint(args.checkpoint, stage)
-        _save_checkpoint(stage_checkpoint, best_state, metadata, best_optimizer_state)
-        _save_checkpoint(args.checkpoint, best_state, metadata, best_optimizer_state)
-        print(f"saved={stage_checkpoint}")
+        if not args.final_checkpoint_only:
+            stage_checkpoint = _stage_checkpoint(args.checkpoint, stage)
+            _save_checkpoint(stage_checkpoint, best_state, metadata, best_optimizer_state)
+            print(f"saved={stage_checkpoint}")
+        _save_checkpoint(
+            args.checkpoint,
+            best_state,
+            metadata,
+            best_optimizer_state,
+            write_metadata=not args.final_checkpoint_only,
+        )
+        if args.final_checkpoint_only:
+            print(f"saved={args.checkpoint}")
     print(f"final_checkpoint={args.checkpoint}")
 
 
@@ -430,47 +495,76 @@ def run_epoch(
     device: torch.device,
     mask_generator: torch.Generator,
     optimizer: torch.optim.Optimizer | None = None,
+    target_mask_cache: list[torch.Tensor] | None = None,
 ) -> dict[str, float]:
     model.train(optimizer is not None)
-    total_loss = total_targets = 0.0
-    channel_squares = [0.0, 0.0]
-    channel_counts = [0.0, 0.0]
-    deviations = torch.tensor(
+    totals = torch.zeros(6, dtype=torch.float64, device=device)
+    deviation_squares = torch.square(torch.tensor(
         normalizer.standard_deviation, dtype=torch.float32, device=device
-    )
-    for batch in loader:
-        masked = mask_batch(
-            batch["values"],
-            batch["observed"],
-            batch["time_features"],
-            stage,
-            mask_generator,
-        )
+    )).view(1, 1, 2)
+    use_cached_masks = bool(target_mask_cache)
+    if use_cached_masks and len(target_mask_cache) != len(loader):
+        raise RuntimeError("validation target-mask cache does not match the loader")
+    for batch_index, batch in enumerate(loader):
+        if use_cached_masks:
+            masked = apply_mask(
+                batch["values"],
+                batch["observed"],
+                batch["time_features"],
+                target_mask_cache[batch_index],
+            )
+        else:
+            masked = mask_batch(
+                batch["values"],
+                batch["observed"],
+                batch["time_features"],
+                stage,
+                mask_generator,
+            )
+            if target_mask_cache is not None:
+                target_mask_cache.append(masked.target_mask)
         features = masked.features.to(device)
         target = masked.target.to(device)
         target_mask = masked.target_mask.to(device)
         with torch.set_grad_enabled(optimizer is not None):
             prediction = model(features)
             squared = torch.square(prediction - target)
-            loss = squared[target_mask].mean()
+            selected_squared = squared[target_mask]
+            loss = selected_squared.mean()
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-        count = target_mask.sum().item()
-        total_loss += loss.item() * count
-        total_targets += count
-        raw_squared = squared * torch.square(deviations.view(1, 1, 2))
-        for channel in range(2):
-            selected = target_mask[..., channel]
-            channel_squares[channel] += raw_squared[..., channel][selected].sum().item()
-            channel_counts[channel] += selected.sum().item()
+        with torch.no_grad():
+            raw_squared = squared.detach() * deviation_squares
+            outdoor = target_mask[..., 0]
+            indoor = target_mask[..., 1]
+            target_count = target_mask.sum()
+            totals += torch.stack(
+                (
+                    loss.detach().to(torch.float64) * target_count,
+                    target_count.to(torch.float64),
+                    raw_squared[..., 0][outdoor].sum().to(torch.float64),
+                    outdoor.sum().to(torch.float64),
+                    raw_squared[..., 1][indoor].sum().to(torch.float64),
+                    indoor.sum().to(torch.float64),
+                )
+            )
+    (
+        total_loss,
+        total_targets,
+        outdoor_squares,
+        outdoor_count,
+        indoor_squares,
+        indoor_count,
+    ) = totals.cpu().tolist()
+    channel_counts = (outdoor_count, indoor_count)
     if not total_targets or min(channel_counts) == 0:
         raise RuntimeError("masking stage produced no reconstruction targets")
     return {
         "loss": total_loss / total_targets,
-        "outdoor_rmse": math_sqrt(channel_squares[0] / channel_counts[0]),
-        "indoor_rmse": math_sqrt(channel_squares[1] / channel_counts[1]),
+        "outdoor_rmse": math_sqrt(outdoor_squares / outdoor_count),
+        "indoor_rmse": math_sqrt(indoor_squares / indoor_count),
         "target_count": total_targets,
     }
 
@@ -536,6 +630,8 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("dropout must be between zero and one")
     if args.learning_rate <= 0 or args.weight_decay < 0 or args.minimum_delta < 0:
         raise ValueError("learning_rate, weight_decay, and minimum_delta are invalid")
+    if args.torch_threads < 0:
+        raise ValueError("torch_threads cannot be negative")
     if args.reconstruction_every_epochs < 0:
         raise ValueError("reconstruction_every_epochs cannot be negative")
     if args.stages and any(
@@ -693,6 +789,7 @@ def _save_checkpoint(
     state: dict[str, torch.Tensor],
     metadata: dict[str, Any],
     optimizer_state: dict[str, Any] | None = None,
+    write_metadata: bool = True,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False)
@@ -706,7 +803,8 @@ def _save_checkpoint(
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-    _write_json(path.with_suffix(".json"), metadata)
+    if write_metadata:
+        _write_json(path.with_suffix(".json"), metadata)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
