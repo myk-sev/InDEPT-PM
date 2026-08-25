@@ -2,6 +2,7 @@
 
 import argparse
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -35,8 +36,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="cached sample indices to graph; omit to graph every cached sample",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("inference_graphs"))
+    parser.add_argument(
+        "--loss-plot",
+        type=Path,
+        help="training/validation loss graph to copy into the output directory",
+    )
     parser.add_argument("--device", default="auto")
     return parser
+
+
+def stack_graphs(output: Path, graphs: list[tuple[Path, str]]) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    images = []
+    for path, label in graphs:
+        with Image.open(path) as image:
+            images.append((image.convert("RGB"), label))
+
+    label_height = 52
+    width = max(image.width for image, _ in images)
+    stacked = Image.new(
+        "RGB",
+        (width, sum(image.height + label_height for image, _ in images)),
+        "white",
+    )
+    draw = ImageDraw.Draw(stacked)
+    font = ImageFont.load_default(size=26)
+    top = 0
+    for image, label in images:
+        draw.text((20, top + 10), label, fill="black", font=font)
+        top += label_height
+        stacked.paste(image, (0, top))
+        top += image.height
+    output.parent.mkdir(parents=True, exist_ok=True)
+    stacked.save(output, dpi=(150, 150))
 
 
 def validate_data_contract(cache: dict, records: list[dict], config: object) -> None:
@@ -68,6 +101,8 @@ def validate_data_contract(cache: dict, records: list[dict], config: object) -> 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.loss_plot is not None and not args.loss_plot.is_file():
+        raise FileNotFoundError(f"loss plot not found: {args.loss_plot}")
     started = time.perf_counter()
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
     if cache.get("format_version") not in SUPPORTED_CACHE_FORMAT_VERSIONS:
@@ -112,6 +147,7 @@ def main() -> None:
     inference_seconds = time.perf_counter() - inference_started
 
     split = cache["split"]
+    graphs: list[tuple[Path, str]] = []
     for record, prediction in zip(selected, predictions):
         index = record["sample_index"]
         name = record.get("name")
@@ -131,8 +167,20 @@ def main() -> None:
             index,
             model_name=model_name,
         )
+        description = re.sub(r"[_-]+", " ", name).title() if name else "Inference"
+        split_label = split.replace("-", " ").title()
+        graphs.append((output, f"{description} - {split_label} Sample {index}"))
         label = f"{name}={index}" if name else str(index)
         print(f"saved sample {label}: {output}")
+
+    stacked_output = args.output_dir / "stacked_inference_graphs.png"
+    stack_graphs(stacked_output, graphs)
+    print(f"saved stacked inference graphs: {stacked_output}")
+
+    if args.loss_plot is not None:
+        loss_output = args.output_dir / "training_validation_loss.png"
+        shutil.copy2(args.loss_plot, loss_output)
+        print(f"copied training/validation loss graph: {loss_output}")
 
     print(
         f"device={device} samples={len(selected)} "

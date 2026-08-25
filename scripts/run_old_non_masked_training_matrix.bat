@@ -86,6 +86,7 @@ if errorlevel 1 (
     --cache "%CACHE%" ^
     --checkpoint "checkpoints\%CHECKPOINT%" ^
     --output-dir "%INFERENCE_DIR%" ^
+    --loss-plot "graphs\%CHECKPOINT:.pt=.loss.png%" ^
     --device "%DEVICE%"
 if errorlevel 1 (
     echo Inference examples failed for %MODEL% at %EPOCHS% epochs.

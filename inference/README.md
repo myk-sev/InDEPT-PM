@@ -120,12 +120,18 @@ Omit `--indices` to generate a graph for every sample in the cache:
 For the named example, this creates:
 
 ```text
-inference/graphs/normal.png
-inference/graphs/elevated.png
-inference/graphs/wildfire_incoming.png
-inference/graphs/wildfire_ongoing.png
-inference/graphs/wildfire_leaving.png
+inference/graphs/MODEL_normal.png
+inference/graphs/MODEL_elevated.png
+inference/graphs/MODEL_wildfire_incoming.png
+inference/graphs/MODEL_wildfire_ongoing.png
+inference/graphs/MODEL_wildfire_leaving.png
+inference/graphs/stacked_inference_graphs.png
 ```
+
+The stacked image places every selected graph in one vertical image and labels
+each panel with its cache name, data split, and sample index. Pass a training
+loss graph with `--loss-plot` to also copy it into the output directory as
+`training_validation_loss.png`.
 
 For an unnamed cache, filenames follow this pattern:
 
