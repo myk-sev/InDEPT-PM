@@ -97,10 +97,10 @@ To add only the bridge to a checkpoint that completed all seven base stages:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
-  --resume .\masked_pretraining\runs\checkpoints\masked_pretraining.pt `
+  --resume .\inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt `
   --tempo-missingness-bridge `
   --epochs-per-stage 10 `
-  --checkpoint .\masked_pretraining\runs\checkpoints\masked_pretraining_bridge.pt
+  --checkpoint .\inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt
 ```
 
 An explicit bridge stage such as `--stages tempo_bridge_86` also requires the
@@ -174,20 +174,23 @@ prefix.
 The implemented supervised handoff, current-layout launchers, strict bridge
 family verification, horizon curriculum, random controls, and baseline
 evaluation are documented in [`../BRIDGE_FORECAST_WORKFLOW.md`](../BRIDGE_FORECAST_WORKFLOW.md).
+Those launchers keep the same dataset/model stem across the dedicated artifact
+folders under `inference`.
 
 Add an architecture by decorating a `ModelConfig -> nn.Module` builder with
-`register_model()` in `models.py`; it must return `[batch, time, 2]`. Future
-run artifacts are separated by type under `masked_pretraining/runs/`:
+`register_model()` in `models.py`; it must return `[batch, time, 2]`. Direct CLI
+runs derive `<dataset>_<model>` from the training CSV and model name, then write:
 
-- `checkpoints/`: stage/final model checkpoints and JSON provenance manifests;
-- `graphs/`: metrics CSV files and loss-curve graphs;
-- `inference/`: validation reconstruction inference graphs.
+- `inference/checkpoints/<dataset_model>.pt`;
+- `inference/metrics/<dataset_model>.csv`;
+- `inference/graphs/<dataset_model>.png`;
+- `inference/reconstructions/<dataset_model>/`: stage/epoch validation images.
 
 Each run writes:
 
-- `<run>.metrics.csv`: one row per epoch with training and validation
+- `<dataset_model>.csv`: one row per epoch with training and validation
   loss, validation RMSE by channel, target counts, and checkpoint improvement;
-- `<run>.loss_curve.png`: training and validation loss across all
+- `<dataset_model>.png`: training and validation loss across all
   completed curriculum stages;
 - `<run>.<stage>.epoch_NNN.reconstruction_examples.png`: four fixed validation windows
   showing the full label history, model-visible history, artificially masked
@@ -196,7 +199,7 @@ Each run writes:
 
 The metrics CSV and loss graph are refreshed after every epoch. After each
 masking-stage block, the reconstruction plot uses that block's lowest-validation
-epoch (20 epochs by default). Its absolute path is stored in the checkpoint JSON.
+epoch (20 epochs by default). Its absolute path is stored in checkpoint metadata.
 
 To refresh the reconstruction plot during a stage, set an epoch interval:
 
@@ -218,9 +221,9 @@ The continuation runs all requested epochs rather than stopping early.
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
-  --resume .\masked_pretraining\runs\checkpoints\masked_pretraining.pt `
+  --resume .\inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt `
   --epochs-per-stage 10 `
-  --checkpoint .\masked_pretraining\runs\checkpoints\masked_pretraining_resumed.pt
+  --checkpoint .\inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt
 ```
 
 Use the same model and data arguments as the original run; incompatible model

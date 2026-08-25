@@ -16,6 +16,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from inference.artifacts import artifact_paths, dataset_model_stem
+
 from .data import (
     Normalizer,
     PairDatabase,
@@ -58,7 +60,6 @@ MASKED_INPUTS = REPOSITORY_ROOT / "inputs" / "masked_pretraining"
 DEFAULT_TRAINING_DATA = (
     MASKED_INPUTS / "exclusion_aware" / "k12_exclusion_aware_masked_training_data.csv"
 )
-DEFAULT_CHECKPOINT = PACKAGE_ROOT / "runs" / "checkpoints" / "masked_pretraining.pt"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,12 +149,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument(
         "--final-checkpoint-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Keep one rolling checkpoint without stage copies or JSON sidecars.",
     )
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", default="auto")
-    train.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    train.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Checkpoint path; defaults to inference/checkpoints/DATASET_MODEL.pt.",
+    )
     train.add_argument(
         "--resume",
         type=Path,
@@ -190,6 +196,9 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def train(args: argparse.Namespace) -> None:
+    if args.checkpoint is None:
+        stem = dataset_model_stem(args.training_data, args.model)
+        args.checkpoint = artifact_paths(stem).checkpoint
     _validate_training_arguments(args)
     if args.torch_threads:
         torch.set_num_threads(args.torch_threads)
@@ -265,12 +274,13 @@ def train(args: argparse.Namespace) -> None:
         args.skip_metrics_csv,
         args.metrics_output,
     )
+    retain_metrics = bool(args.resume or args.resume_metrics)
     metrics = (
         read_metrics(diagnostics.metrics)
-        if args.resume_metrics and diagnostics.metrics
+        if retain_metrics and diagnostics.metrics
         else []
     )
-    if args.resume_metrics:
+    if retain_metrics:
         metrics = [row for row in metrics if row["stage"] in completed]
     metric_offset = len(metrics)
     timed_epoch_offset = sum(
@@ -501,7 +511,7 @@ def train(args: argparse.Namespace) -> None:
                     "tempo_data_used": False,
                     "outdoor_artificial_missing_fractions": {
                         stage_name: TEMPO_BRIDGE_MISSING_FRACTIONS[stage_name]
-                        for stage_name in stages
+                        for stage_name in completed
                         if stage_name in TEMPO_BRIDGE_MISSING_FRACTIONS
                     },
                 },

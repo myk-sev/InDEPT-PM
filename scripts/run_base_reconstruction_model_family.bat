@@ -26,6 +26,7 @@ cd /d "%REPO_ROOT%" || exit /b 1
 set "PYTHON=.venv\Scripts\python.exe"
 set "INFERENCE_ROOT=inference"
 set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
+set "METRICS_ROOT=%INFERENCE_ROOT%\metrics"
 set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
 set "RECONSTRUCTION_ROOT=%INFERENCE_ROOT%\reconstructions"
 set "ALL_DATA=inputs\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
@@ -41,8 +42,8 @@ if not defined DRY_RUN (
 )
 
 set "TRAINING_COUNT=0"
-call :run_dataset "all_excl_final" "%ALL_DATA%" || goto :fail
-call :run_dataset "k12_excl_final" "%K12_DATA%" || goto :fail
+call :run_dataset "all_excl_fine_t" "%ALL_DATA%" || goto :fail
+call :run_dataset "k12_excl_fine_t" "%K12_DATA%" || goto :fail
 
 echo Completed %TRAINING_COUNT% base-reconstruction training runs.
 cd /d "%START_DIR%"
@@ -66,14 +67,17 @@ exit /b 0
 
 :run_model
 set "MODEL=%~1"
-set "RUN_NAME=base_reconstruction__%DATASET%__%MODEL%"
-set "CHECKPOINT=%CHECKPOINT_ROOT%\%RUN_NAME%.pt"
-set "LOSS_CURVE=%GRAPH_ROOT%\%RUN_NAME%.loss_curve.png"
-set "RECONSTRUCTION_DIR=%RECONSTRUCTION_ROOT%\%RUN_NAME%"
+set "ARTIFACT_NAME=%DATASET%_%MODEL%"
+set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
+set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
+set "LOSS_CURVE=%GRAPH_ROOT%\%ARTIFACT_NAME%.png"
+set "RECONSTRUCTION_DIR=%RECONSTRUCTION_ROOT%\%ARTIFACT_NAME%"
+set "RECONSTRUCTION_OUTPUT=%RECONSTRUCTION_DIR%\run.reconstruction_examples.png"
 set /a TRAINING_COUNT+=1 >nul
 echo.
 echo Starting %DATASET% / %MODEL%
 echo Checkpoint: %CHECKPOINT%
+echo Metrics: %METRICS%
 echo Loss graph: %LOSS_CURVE%
 echo Reconstructions: %RECONSTRUCTION_DIR%
 if defined DRY_RUN exit /b 0
@@ -85,9 +89,9 @@ if defined DRY_RUN exit /b 0
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
     --reconstruction-every-epochs 5 ^
-    --reconstruction-output "%RECONSTRUCTION_DIR%\run.reconstruction_examples.png" ^
+    --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
     --loss-curve-output "%LOSS_CURVE%" ^
-    --skip-metrics-csv ^
+    --metrics-output "%METRICS%" ^
     --final-checkpoint-only ^
     --batch-size "%BATCH_SIZE%" ^
     --workers "%WORKERS%" ^

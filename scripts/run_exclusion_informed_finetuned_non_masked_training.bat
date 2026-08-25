@@ -21,13 +21,19 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "TRAINER=pm25_transformer.py"
-set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
-set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
-set "INFERENCE_ROOT=inference\exclusion_informed_finetuned_non_masked_matrix"
-set "SCHOOL_DATA=inputs\school_old_training_data_exclusion_informed_finetuned.csv"
-set "SCHOOL_CYCLICAL_DATA=inputs\school_old_training_data_exclusion_informed_finetuned_cyclical.csv"
-set "ALL_DATA=inputs\all_old_training_data_exclusion_informed_finetuned.csv"
-set "ALL_CYCLICAL_DATA=inputs\all_old_training_data_exclusion_informed_finetuned_cyclical.csv"
+set "LINEAR_CACHE=inference\caches\keller_elementary_school_cache.pt"
+set "CYCLICAL_CACHE=inference\caches\keller_elementary_school_cache_cyclical.pt"
+if not exist "%LINEAR_CACHE%" set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
+if not exist "%CYCLICAL_CACHE%" set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
+set "INFERENCE_ROOT=inference"
+set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
+set "METRICS_ROOT=%INFERENCE_ROOT%\metrics"
+set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
+set "FORECAST_ROOT=%INFERENCE_ROOT%\forecasts"
+set "SCHOOL_DATA=inputs\unmasked_type\school_old_training_data_exclusion_informed_finetuned.csv"
+set "SCHOOL_CYCLICAL_DATA=inputs\unmasked_type\school_old_training_data_exclusion_informed_finetuned_cyclical.csv"
+set "ALL_DATA=inputs\unmasked_type\all_old_training_data_exclusion_informed_finetuned.csv"
+set "ALL_CYCLICAL_DATA=inputs\unmasked_type\all_old_training_data_exclusion_informed_finetuned_cyclical.csv"
 
 for %%P in (
     "%PYTHON%"
@@ -47,7 +53,7 @@ for %%P in (
 
 set "TRAINING_COUNT=0"
 call :run_dataset "school" "%SCHOOL_DATA%" "%SCHOOL_CYCLICAL_DATA%" || goto :fail
-call :run_dataset "all-sensors" "%ALL_DATA%" "%ALL_CYCLICAL_DATA%" || goto :fail
+call :run_dataset "all_sensors" "%ALL_DATA%" "%ALL_CYCLICAL_DATA%" || goto :fail
 
 echo Completed %TRAINING_COUNT% training runs.
 cd /d "%START_DIR%"
@@ -84,11 +90,17 @@ if not "%MODEL:cyclical=%"=="%MODEL%" (
     set "TRAINING_DATA=%CYCLICAL_DATA%"
     set "CACHE=%CYCLICAL_CACHE%"
 )
-set "CHECKPOINT=old-non-masked-%DATASET%-exclusion-informed-finetuned-%MODEL%-%EPOCHS%ep.pt"
-set "INFERENCE_DIR=%INFERENCE_ROOT%\%DATASET%\%MODEL%\%EPOCHS%ep"
+set "ARTIFACT_NAME=%DATASET%_excl_fine_t_%MODEL%_%EPOCHS%ep"
+set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
+set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
+set "LOSS_CURVE=%GRAPH_ROOT%\%ARTIFACT_NAME%.png"
+set "FORECAST_DIR=%FORECAST_ROOT%\%ARTIFACT_NAME%"
 set /a TRAINING_COUNT+=1 >nul
 echo Starting %DATASET% / %MODEL%: epochs=%EPOCHS% patience=%EPOCHS% data=%TRAINING_DATA% checkpoint=%CHECKPOINT%
-echo Inference examples: cache=%CACHE% output=%INFERENCE_DIR%
+echo Checkpoint: %CHECKPOINT%
+echo Metrics: %METRICS%
+echo Loss graph: %LOSS_CURVE%
+echo Forecasts: %FORECAST_DIR%
 if defined DRY_RUN exit /b 0
 
 %PYTHON% %TRAINER% train ^
@@ -99,6 +111,8 @@ if defined DRY_RUN exit /b 0
     --batch-size %BATCH_SIZE% ^
     --num-workers %NUM_WORKERS% ^
     --device "%DEVICE%" ^
+    --metrics-output "%METRICS%" ^
+    --loss-plot "%LOSS_CURVE%" ^
     --checkpoint "%CHECKPOINT%"
 if errorlevel 1 (
     echo Training failed for %DATASET% / %MODEL% at %EPOCHS% epochs.
@@ -107,9 +121,8 @@ if errorlevel 1 (
 
 %PYTHON% -m inference.run_cached_inference ^
     --cache "%CACHE%" ^
-    --checkpoint "checkpoints\%CHECKPOINT%" ^
-    --output-dir "%INFERENCE_DIR%" ^
-    --loss-plot "graphs\%CHECKPOINT:.pt=.loss.png%" ^
+    --checkpoint "%CHECKPOINT%" ^
+    --output-dir "%FORECAST_DIR%" ^
     --device "%DEVICE%"
 if errorlevel 1 (
     echo Inference examples failed for %DATASET% / %MODEL% at %EPOCHS% epochs.

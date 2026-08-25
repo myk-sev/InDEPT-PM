@@ -21,23 +21,29 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "TRAINER=pm25_transformer.py"
-set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
-set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
-set "INFERENCE_ROOT=inference\additional_old_non_masked_matrices"
+set "LINEAR_CACHE=inference\caches\keller_elementary_school_cache.pt"
+set "CYCLICAL_CACHE=inference\caches\keller_elementary_school_cache_cyclical.pt"
+if not exist "%LINEAR_CACHE%" set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"
+if not exist "%CYCLICAL_CACHE%" set "CYCLICAL_CACHE=inference\keller_elementary_school_cache_cyclical.pt"
+set "INFERENCE_ROOT=inference"
+set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
+set "METRICS_ROOT=%INFERENCE_ROOT%\metrics"
+set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
+set "FORECAST_ROOT=%INFERENCE_ROOT%\forecasts"
 
 for %%P in (
     "%PYTHON%"
     "%TRAINER%"
     "%LINEAR_CACHE%"
     "%CYCLICAL_CACHE%"
-    "inputs\balanced_old_training_data.csv"
-    "inputs\balanced_old_training_data_cyclical.csv"
-    "inputs\non_school_old_training_data_exclusion_aware.csv"
-    "inputs\non_school_old_training_data_exclusion_aware_cyclical.csv"
-    "inputs\school_old_training_data.csv"
-    "inputs\school_old_training_data_cyclical.csv"
-    "inputs\school_old_training_data_exclusion_aware.csv"
-    "inputs\school_old_training_data_exclusion_aware_cyclical.csv"
+    "inputs\unmasked_type\balanced_old_training_data.csv"
+    "inputs\unmasked_type\balanced_old_training_data_cyclical.csv"
+    "inputs\unmasked_type\non_school_old_training_data_exclusion_aware.csv"
+    "inputs\unmasked_type\non_school_old_training_data_exclusion_aware_cyclical.csv"
+    "inputs\unmasked_type\school_old_training_data.csv"
+    "inputs\unmasked_type\school_old_training_data_cyclical.csv"
+    "inputs\unmasked_type\school_old_training_data_exclusion_aware.csv"
+    "inputs\unmasked_type\school_old_training_data_exclusion_aware_cyclical.csv"
 ) do (
     if not exist "%%~P" (
         echo Required path not found: %%~P
@@ -45,10 +51,10 @@ for %%P in (
     )
 )
 
-call :run_dataset "balanced" "inputs\balanced_old_training_data.csv" "inputs\balanced_old_training_data_cyclical.csv" || goto :fail
-call :run_dataset "non-school-exclusion-aware" "inputs\non_school_old_training_data_exclusion_aware.csv" "inputs\non_school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
-call :run_dataset "school" "inputs\school_old_training_data.csv" "inputs\school_old_training_data_cyclical.csv" || goto :fail
-call :run_dataset "school-exclusion-aware" "inputs\school_old_training_data_exclusion_aware.csv" "inputs\school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
+call :run_dataset "balanced" "inputs\unmasked_type\balanced_old_training_data.csv" "inputs\unmasked_type\balanced_old_training_data_cyclical.csv" || goto :fail
+call :run_dataset "non_school_excl_aware" "inputs\unmasked_type\non_school_old_training_data_exclusion_aware.csv" "inputs\unmasked_type\non_school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
+call :run_dataset "school" "inputs\unmasked_type\school_old_training_data.csv" "inputs\unmasked_type\school_old_training_data_cyclical.csv" || goto :fail
+call :run_dataset "school_excl_aware" "inputs\unmasked_type\school_old_training_data_exclusion_aware.csv" "inputs\unmasked_type\school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
 
 cd /d "%START_DIR%"
 exit /b 0
@@ -78,16 +84,22 @@ exit /b 0
 :run_one
 set "MODEL=%~1"
 set "EPOCHS=%~2"
-set "CHECKPOINT=old-non-masked-%DATASET%-%MODEL%-%EPOCHS%ep.pt"
+set "ARTIFACT_NAME=old_non_masked_%DATASET%_%MODEL%_%EPOCHS%ep"
+set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
+set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
+set "LOSS_CURVE=%GRAPH_ROOT%\%ARTIFACT_NAME%.png"
+set "FORECAST_DIR=%FORECAST_ROOT%\%ARTIFACT_NAME%"
 set "TRAINING_DATA=%LINEAR_DATA%"
 set "CACHE=%LINEAR_CACHE%"
 if not "%MODEL:cyclical=%"=="%MODEL%" (
     set "TRAINING_DATA=%CYCLICAL_DATA%"
     set "CACHE=%CYCLICAL_CACHE%"
 )
-set "INFERENCE_DIR=%INFERENCE_ROOT%\%DATASET%\%MODEL%\%EPOCHS%ep"
 echo Starting %DATASET% / %MODEL%: epochs=%EPOCHS% patience=%EPOCHS% data=%TRAINING_DATA% checkpoint=%CHECKPOINT%
-echo Inference examples: cache=%CACHE% output=%INFERENCE_DIR%
+echo Checkpoint: %CHECKPOINT%
+echo Metrics: %METRICS%
+echo Loss graph: %LOSS_CURVE%
+echo Forecasts: %FORECAST_DIR%
 if defined DRY_RUN exit /b 0
 
 %PYTHON% %TRAINER% train ^
@@ -98,6 +110,8 @@ if defined DRY_RUN exit /b 0
     --batch-size %BATCH_SIZE% ^
     --num-workers %NUM_WORKERS% ^
     --device "%DEVICE%" ^
+    --metrics-output "%METRICS%" ^
+    --loss-plot "%LOSS_CURVE%" ^
     --checkpoint "%CHECKPOINT%"
 if errorlevel 1 (
     echo Training failed for %DATASET% / %MODEL% at %EPOCHS% epochs.
@@ -106,9 +120,8 @@ if errorlevel 1 (
 
 %PYTHON% -m inference.run_cached_inference ^
     --cache "%CACHE%" ^
-    --checkpoint "checkpoints\%CHECKPOINT%" ^
-    --output-dir "%INFERENCE_DIR%" ^
-    --loss-plot "graphs\%CHECKPOINT:.pt=.loss.png%" ^
+    --checkpoint "%CHECKPOINT%" ^
+    --output-dir "%FORECAST_DIR%" ^
     --device "%DEVICE%"
 if errorlevel 1 (
     echo Inference examples failed for %DATASET% / %MODEL% at %EPOCHS% epochs.

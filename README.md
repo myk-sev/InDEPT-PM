@@ -129,7 +129,7 @@ from scratch for the step-delta format.
 
 Training writes a recovery checkpoint after every completed epoch alongside the
 best-model checkpoint. For `--checkpoint model.pt`, the recovery file is
-`checkpoints/model.last.pt`.
+`inference/checkpoints/model.last.pt`.
 
 Re-run the original training command with `--resume`. The `--epochs` value is
 the total target, not the number of additional epochs:

@@ -10,6 +10,8 @@ import torch
 
 from pm25_transformer import build_loaders, file_sha256, load_checkpoint
 
+from .artifacts import artifact_paths
+
 
 CACHE_FORMAT_VERSION = 2
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
@@ -31,7 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME=INDEX",
         help="named samples, such as normal=6281 wildfire_incoming=2445",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="defaults to inference/caches/CHECKPOINT_STEM.pt",
+    )
     return parser
 
 
@@ -65,6 +71,10 @@ def parse_samples(args: argparse.Namespace) -> list[tuple[str | None, int]]:
 
 def main() -> None:
     args = build_parser().parse_args()
+    paths = artifact_paths(args.checkpoint.stem)
+    if args.checkpoint.parent == Path("."):
+        args.checkpoint = paths.checkpoint.with_name(args.checkpoint.name)
+    args.output = args.output or paths.cache
     requested_samples = parse_samples(args)
     indices = [index for _, index in requested_samples]
 

@@ -34,8 +34,11 @@ Run it after inspection:
 scripts\run_base_reconstruction_model_family.bat auto 20 64 0
 ```
 
-It writes 22 checkpoints under `inference\checkpoints`: eleven architectures
-for the all-sensor cohort and eleven for K-12.
+It writes eleven architectures for each cohort. Every artifact uses the same
+`<dataset>_<model>` stem: checkpoints go to `inference\checkpoints`, metrics to
+`inference\metrics`, cumulative loss graphs to `inference\graphs`, and the
+multiple stage/epoch reconstruction images to a matching folder under
+`inference\reconstructions`.
 
 ## 2. Inspect and run the bridge matrix
 
@@ -93,14 +96,16 @@ The trainer selects the matching `bridge-forecast-*` model automatically when
 
 ```bat
 .venv\Scripts\python.exe pm25_transformer.py train ^
-  --pretrained-checkpoint inference\checkpoints\bridge_training__k12_excl_final__dual-encoder-cross-fusion.pt ^
+  --pretrained-checkpoint inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt ^
   --training-data inputs\unmasked_type\school_old_training_data_exclusion_informed_finetuned_cyclical.csv ^
   --history-initialization pretrained ^
   --epochs 50 ^
   --freeze-history-epochs 3 ^
   --forecast-horizons 3 6 12 24 36 ^
   --horizon-stage-epochs 5 5 10 10 20 ^
-  --checkpoint k12_dual_cross_bridge_forecast.pt
+  --checkpoint inference\checkpoints\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.pt ^
+  --metrics-output inference\metrics\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.csv ^
+  --loss-plot inference\graphs\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.png
 ```
 
 The resulting forecast checkpoint contains all transferred history weights,
@@ -110,9 +115,20 @@ inference therefore does not reopen the bridge checkpoint.
 
 ## Outputs
 
-- Base and bridge checkpoints: `inference\checkpoints`
-- Base and bridge loss graphs: `inference\graphs`
-- Reconstruction diagnostics: `inference\reconstructions`
-- Forecast checkpoints: `checkpoints`
-- Forecast loss graphs: `graphs`
-- Forecast inference and evaluation: `inference\bridge_forecast`
+Every output type has a dedicated folder. Single-file artifacts share the
+unambiguous `<dataset>_<model>` stem; only multi-image outputs add one unnested
+folder per training artifact. Base reconstruction and bridge stages for the same
+dataset/model continuously update the same checkpoint, metrics CSV, loss graph,
+and reconstruction folder. For example:
+
+```text
+inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt
+inference\metrics\k12_excl_fine_t_dual-encoder-cross-fusion.csv
+inference\graphs\k12_excl_fine_t_dual-encoder-cross-fusion.png
+inference\reconstructions\k12_excl_fine_t_dual-encoder-cross-fusion\*.png
+inference\forecasts\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained\*.png
+inference\evaluations\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.json
+```
+
+Shared inference caches live under `inference\caches`; they are generation-time
+inputs reused by multiple training runs.

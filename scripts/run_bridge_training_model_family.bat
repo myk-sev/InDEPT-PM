@@ -26,6 +26,7 @@ cd /d "%REPO_ROOT%" || exit /b 1
 set "PYTHON=.venv\Scripts\python.exe"
 set "INFERENCE_ROOT=inference"
 set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
+set "METRICS_ROOT=%INFERENCE_ROOT%\metrics"
 set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
 set "RECONSTRUCTION_ROOT=%INFERENCE_ROOT%\reconstructions"
 set "LEGACY_BASE_ROOT=masked_pretraining\runs\base_reconstruction"
@@ -43,14 +44,14 @@ if not defined DRY_RUN (
 
 if not defined DRY_RUN (
     set "CHECKPOINT_COUNT=0"
-    call :preflight_dataset "all_excl_final" "%ALL_DATA%" || goto :fail
-    call :preflight_dataset "k12_excl_final" "%K12_DATA%" || goto :fail
+    call :preflight_dataset "all_excl_fine_t" "%ALL_DATA%" "all_excl_final" || goto :fail
+    call :preflight_dataset "k12_excl_fine_t" "%K12_DATA%" "k12_excl_final" || goto :fail
     echo Verified %CHECKPOINT_COUNT% complete base checkpoints.
 )
 
 set "TRAINING_COUNT=0"
-call :run_dataset "all_excl_final" "%ALL_DATA%" || goto :fail
-call :run_dataset "k12_excl_final" "%K12_DATA%" || goto :fail
+call :run_dataset "all_excl_fine_t" "%ALL_DATA%" "all_excl_final" || goto :fail
+call :run_dataset "k12_excl_fine_t" "%K12_DATA%" "k12_excl_final" || goto :fail
 
 if not defined DRY_RUN (
     %PYTHON% -m masked_pretraining.verify_bridge_family ^
@@ -64,6 +65,7 @@ exit /b 0
 :preflight_dataset
 set "DATASET=%~1"
 set "TRAINING_DATA=%~2"
+set "LEGACY_DATASET=%~3"
 for /f "delims=" %%M in ('%PYTHON% -c "from masked_pretraining.models import model_names; print(*model_names(), sep='\n')"') do (
     call :check_base_checkpoint "%%M" || exit /b 1
 )
@@ -71,8 +73,9 @@ exit /b 0
 
 :check_base_checkpoint
 set "MODEL=%~1"
-set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\base_reconstruction__%DATASET%__%MODEL%.pt"
-if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%LEGACY_BASE_ROOT%\%DATASET%\%MODEL%\checkpoints\run.pt"
+set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\%DATASET%_%MODEL%.pt"
+if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\base_reconstruction__%LEGACY_DATASET%__%MODEL%.pt"
+if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%LEGACY_BASE_ROOT%\%LEGACY_DATASET%\%MODEL%\checkpoints\run.pt"
 if not exist "%BASE_CHECKPOINT%" (
     echo Base checkpoint not found: %BASE_CHECKPOINT%
     exit /b 1
@@ -85,6 +88,7 @@ exit /b 0
 :run_dataset
 set "DATASET=%~1"
 set "TRAINING_DATA=%~2"
+set "LEGACY_DATASET=%~3"
 echo Dataset: %DATASET%
 echo Training data: %TRAINING_DATA%
 for /f "delims=" %%M in ('%PYTHON% -c "from masked_pretraining.models import model_names; print(*model_names(), sep='\n')"') do (
@@ -94,17 +98,21 @@ exit /b 0
 
 :run_model
 set "MODEL=%~1"
-set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\base_reconstruction__%DATASET%__%MODEL%.pt"
-if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%LEGACY_BASE_ROOT%\%DATASET%\%MODEL%\checkpoints\run.pt"
-set "RUN_NAME=bridge_training__%DATASET%__%MODEL%"
-set "CHECKPOINT=%CHECKPOINT_ROOT%\%RUN_NAME%.pt"
-set "LOSS_CURVE=%GRAPH_ROOT%\%RUN_NAME%.loss_curve.png"
-set "RECONSTRUCTION_DIR=%RECONSTRUCTION_ROOT%\%RUN_NAME%"
+set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\%DATASET%_%MODEL%.pt"
+if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\base_reconstruction__%LEGACY_DATASET%__%MODEL%.pt"
+if not exist "%BASE_CHECKPOINT%" set "BASE_CHECKPOINT=%LEGACY_BASE_ROOT%\%LEGACY_DATASET%\%MODEL%\checkpoints\run.pt"
+set "ARTIFACT_NAME=%DATASET%_%MODEL%"
+set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
+set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
+set "LOSS_CURVE=%GRAPH_ROOT%\%ARTIFACT_NAME%.png"
+set "RECONSTRUCTION_DIR=%RECONSTRUCTION_ROOT%\%ARTIFACT_NAME%"
+set "RECONSTRUCTION_OUTPUT=%RECONSTRUCTION_DIR%\run.reconstruction_examples.png"
 set /a TRAINING_COUNT+=1 >nul
 echo.
 echo Starting bridge: %DATASET% / %MODEL%
 echo Base checkpoint: %BASE_CHECKPOINT%
 echo Checkpoint: %CHECKPOINT%
+echo Metrics: %METRICS%
 echo Loss graph: %LOSS_CURVE%
 echo Reconstructions: %RECONSTRUCTION_DIR%
 if defined DRY_RUN exit /b 0
@@ -117,9 +125,10 @@ if defined DRY_RUN exit /b 0
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
     --reconstruction-every-epochs 5 ^
-    --reconstruction-output "%RECONSTRUCTION_DIR%\run.reconstruction_examples.png" ^
+    --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
     --loss-curve-output "%LOSS_CURVE%" ^
-    --skip-metrics-csv ^
+    --metrics-output "%METRICS%" ^
+    --resume-metrics ^
     --final-checkpoint-only ^
     --batch-size "%BATCH_SIZE%" ^
     --workers "%WORKERS%" ^

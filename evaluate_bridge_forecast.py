@@ -8,6 +8,8 @@ from pathlib import Path
 
 import torch
 
+from inference.artifacts import artifact_paths
+
 from pm25_transformer import (
     build_singular_loaders,
     file_sha256,
@@ -136,9 +138,17 @@ def main() -> None:
         description="Compare a bridge forecast with persistence and linear baselines."
     )
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="defaults to inference/evaluations/CHECKPOINT_STEM.json",
+    )
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
+    paths = artifact_paths(args.checkpoint.stem)
+    if args.checkpoint.parent == Path("."):
+        args.checkpoint = paths.checkpoint.with_name(args.checkpoint.name)
+    args.output = args.output or paths.evaluation
     report = evaluate(args.checkpoint, args.output, args.device)
     print(f"evaluated_model={report['model_name']}")
     print(f"output={args.output.resolve()}")

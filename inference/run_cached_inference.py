@@ -2,7 +2,6 @@
 
 import argparse
 import re
-import shutil
 import time
 from pathlib import Path
 
@@ -15,6 +14,8 @@ from pm25_transformer import (
     plot_prediction,
     resolve_device,
 )
+
+from .artifacts import artifact_paths
 
 
 CACHE_FORMAT_VERSION = 2
@@ -35,11 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="cached sample indices to graph; omit to graph every cached sample",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("inference_graphs"))
     parser.add_argument(
-        "--loss-plot",
+        "--output-dir",
         type=Path,
-        help="training/validation loss graph to copy into the output directory",
+        help="defaults to inference/forecasts/CHECKPOINT_STEM/",
     )
     parser.add_argument("--device", default="auto")
     return parser
@@ -101,8 +101,10 @@ def validate_data_contract(cache: dict, records: list[dict], config: object) -> 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.loss_plot is not None and not args.loss_plot.is_file():
-        raise FileNotFoundError(f"loss plot not found: {args.loss_plot}")
+    paths = artifact_paths(args.checkpoint.stem)
+    if args.checkpoint.parent == Path("."):
+        args.checkpoint = paths.checkpoint.with_name(args.checkpoint.name)
+    args.output_dir = args.output_dir or paths.forecasts
     started = time.perf_counter()
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
     if cache.get("format_version") not in SUPPORTED_CACHE_FORMAT_VERSIONS:
@@ -176,11 +178,6 @@ def main() -> None:
     stacked_output = args.output_dir / "stacked_inference_graphs.png"
     stack_graphs(stacked_output, graphs)
     print(f"saved stacked inference graphs: {stacked_output}")
-
-    if args.loss_plot is not None:
-        loss_output = args.output_dir / "training_validation_loss.png"
-        shutil.copy2(args.loss_plot, loss_output)
-        print(f"copied training/validation loss graph: {loss_output}")
 
     print(
         f"device={device} samples={len(selected)} "

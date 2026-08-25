@@ -18,6 +18,8 @@ import torch
 from torch import nn
 from torch.utils.data import default_collate
 
+from inference.artifacts import artifact_paths
+
 from .data import Normalizer, PairWindowDataset
 from .masking import mask_batch
 
@@ -51,20 +53,12 @@ def diagnostic_paths(
     skip_metrics_csv: bool = False,
     metrics_output: Path | None = None,
 ) -> DiagnosticPaths:
-    base = checkpoint.with_suffix("") if checkpoint.suffix else checkpoint
-    run_directory = (
-        checkpoint.parent.parent
-        if checkpoint.parent.name == "checkpoints"
-        else checkpoint.parent
-    )
+    paths = artifact_paths(checkpoint.stem)
     return DiagnosticPaths(
-        None
-        if skip_metrics_csv
-        else metrics_output or run_directory / "graphs" / f"{base.name}.metrics.csv",
-        loss_curve_output
-        or run_directory / "graphs" / f"{base.name}.loss_curve.png",
+        None if skip_metrics_csv else metrics_output or paths.metrics,
+        loss_curve_output or paths.graph,
         reconstruction_output
-        or run_directory / "inference" / f"{base.name}.reconstruction_examples.png",
+        or paths.reconstructions / "run.reconstruction_examples.png",
     )
 
 

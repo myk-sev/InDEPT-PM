@@ -8,6 +8,11 @@ the complete evaluation dataset every time.
 - [`run_cached_inference.py`](run_cached_inference.py) loads those prepared
   samples, runs the trained model, and creates forecast graphs.
 
+Project training launchers use dedicated type folders under `inference` and the
+same `<dataset>_<model>` stem for every single-file artifact. Cached forecast
+images go in one unnested folder under `inference/forecasts/<dataset_model>/`;
+generated cache files go under `inference/caches/`.
+
 ## Run the utilities as modules
 
 The `inference` directory is a Python package, identified by
@@ -67,7 +72,7 @@ filename-safe name:
 
 ```powershell
 .\.venv\Scripts\python.exe -m inference.build_inference_cache `
-  --checkpoint .\pm25_transformer_smoke_test.pt `
+  --checkpoint .\inference\checkpoints\pm25_transformer_smoke_test.pt `
   --split temporal-test `
   --samples `
     normal=6281 `
@@ -75,7 +80,7 @@ filename-safe name:
     wildfire_incoming=2445 `
     wildfire_ongoing=3118 `
     wildfire_leaving=4227 `
-  --output .\inference\inference_samples.cache.pt
+  --output .\inference\caches\inference_samples.cache.pt
 ```
 
 Names may contain letters, numbers, underscores, and hyphens. Names and indices
@@ -98,10 +103,10 @@ The default is `temporal-test`.
 
 ```powershell
 .\.venv\Scripts\python.exe -m inference.build_inference_cache `
-  --checkpoint .\pm25_transformer_smoke_test.pt `
+  --checkpoint .\inference\checkpoints\pm25_transformer_smoke_test.pt `
   --split temporal-test `
   --indices 6281 4399 2445 3118 4227 `
-  --output .\inference\inference_samples.cache.pt
+  --output .\inference\caches\inference_samples.cache.pt
 ```
 
 `--samples` and `--indices` are alternatives and cannot be supplied together.
@@ -112,26 +117,24 @@ Omit `--indices` to generate a graph for every sample in the cache:
 
 ```powershell
 .\.venv\Scripts\python.exe -m inference.run_cached_inference `
-  --cache .\inference\inference_samples.cache.pt `
-  --checkpoint .\pm25_transformer_smoke_test.pt `
-  --output-dir .\inference\graphs
+  --cache .\inference\caches\inference_samples.cache.pt `
+  --checkpoint .\inference\checkpoints\pm25_transformer_smoke_test.pt
 ```
 
 For the named example, this creates:
 
 ```text
-inference/graphs/MODEL_normal.png
-inference/graphs/MODEL_elevated.png
-inference/graphs/MODEL_wildfire_incoming.png
-inference/graphs/MODEL_wildfire_ongoing.png
-inference/graphs/MODEL_wildfire_leaving.png
-inference/graphs/stacked_inference_graphs.png
+inference/forecasts/pm25_transformer_smoke_test/MODEL_normal.png
+inference/forecasts/pm25_transformer_smoke_test/MODEL_elevated.png
+inference/forecasts/pm25_transformer_smoke_test/MODEL_wildfire_incoming.png
+inference/forecasts/pm25_transformer_smoke_test/MODEL_wildfire_ongoing.png
+inference/forecasts/pm25_transformer_smoke_test/MODEL_wildfire_leaving.png
+inference/forecasts/pm25_transformer_smoke_test/stacked_inference_graphs.png
 ```
 
 The stacked image places every selected graph in one vertical image and labels
-each panel with its cache name, data split, and sample index. Pass a training
-loss graph with `--loss-plot` to also copy it into the output directory as
-`training_validation_loss.png`.
+each panel with its cache name, data split, and sample index. The training loss
+graph remains separately at `inference/graphs/<dataset_model>.png`.
 
 For an unnamed cache, filenames follow this pattern:
 
@@ -146,7 +149,7 @@ stored names are still used for the output filenames:
 
 ```powershell
 .\.venv\Scripts\python.exe -m inference.run_cached_inference `
-  --cache .\inference\inference_samples.cache.pt `
+  --cache .\inference\caches\inference_samples.cache.pt `
   --checkpoint .\pm25_transformer_smoke_test.pt `
   --indices 2445 3118 4227 `
   --output-dir .\inference\wildfire_graphs
@@ -170,7 +173,7 @@ then CPU according to availability. A device can be selected explicitly:
 
 ```powershell
 .\.venv\Scripts\python.exe -m inference.run_cached_inference `
-  --cache .\inference\inference_samples.cache.pt `
+  --cache .\inference\caches\inference_samples.cache.pt `
   --checkpoint .\pm25_transformer_smoke_test.pt `
   --output-dir .\inference\graphs `
   --device cpu

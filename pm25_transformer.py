@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import math
+import os
 import random
 import time
 from collections.abc import Iterable
@@ -13,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
+
+from inference.artifacts import artifact_paths, dataset_model_stem
 
 from data_loader import (
     PERMANENT_EXCLUSIONS_PATH,
@@ -40,9 +44,19 @@ from pm25_models import (
 
 
 CHECKPOINT_FORMAT_VERSION = 2
-CHECKPOINT_DIR = Path("checkpoints")
-DEFAULT_GRAPH_DIR = Path("graphs")
-DEFAULT_CHECKPOINT = Path("pm25_transformer.pt")
+FORECAST_METRIC_FIELDS = (
+    "epoch",
+    "forecast_horizon",
+    "train_loss",
+    "validation_loss",
+    "train_mae",
+    "train_mse",
+    "train_rmse",
+    "validation_mae",
+    "validation_mse",
+    "validation_rmse",
+    "pipeline_elapsed_seconds",
+)
 
 
 @dataclass(frozen=True)
@@ -244,15 +258,24 @@ def save_checkpoint(
             time.sleep(1)
 
 
-def output_filename(value: str) -> Path:
-    path = Path(value)
-    if path.name != value:
-        raise argparse.ArgumentTypeError("must be a file name, not a path")
-    return path
-
-
 def recovery_checkpoint_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}.last{path.suffix}")
+
+
+def output_path(value: Path | None, default: Path) -> Path:
+    if value is None:
+        return default
+    return default.with_name(value.name) if value.parent == Path(".") else value
+
+
+def write_forecast_metrics(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=FORECAST_METRIC_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(temporary, path)
 
 
 def load_checkpoint(
@@ -736,7 +759,16 @@ def train(args: argparse.Namespace) -> None:
 
     set_seed(args.seed)
     device = resolve_device(args.device)
-    checkpoint_path = CHECKPOINT_DIR / args.checkpoint
+    source = training_data or args.pairs
+    stem = (
+        args.checkpoint.stem
+        if args.checkpoint
+        else dataset_model_stem(source, args.model)
+    )
+    paths = artifact_paths(stem)
+    checkpoint_path = output_path(args.checkpoint, paths.checkpoint)
+    metrics_path = output_path(args.metrics_output, paths.metrics)
+    loss_plot = output_path(args.loss_plot, paths.graph)
     recovery_path = recovery_checkpoint_path(checkpoint_path)
     training_config = {
         "model": args.model,
@@ -909,6 +941,7 @@ def train(args: argparse.Namespace) -> None:
         stale_epochs = state["stale_epochs"]
         training_losses = state["training_losses"]
         validation_losses = state["validation_losses"]
+        metrics = state.get("metrics", [])
         random.setstate(state["python_random_state"])
         np.random.set_state(state["numpy_random_state"])
         torch.set_rng_state(state["torch_random_state"].cpu())
@@ -930,6 +963,7 @@ def train(args: argparse.Namespace) -> None:
         training_losses = [math.nan] * start_epoch
         validation_losses = [math.nan] * start_epoch
         validation_losses[-1] = best_loss
+        metrics = []
         set_seed(args.seed)
         print(
             f"resuming_weights={resume_path} completed_epochs={start_epoch} "
@@ -941,6 +975,27 @@ def train(args: argparse.Namespace) -> None:
         stale_epochs = 0
         training_losses = []
         validation_losses = []
+        metrics = []
+    if len(metrics) != start_epoch:
+        metrics = [
+            {
+                "epoch": epoch,
+                "forecast_horizon": horizon_schedule[epoch - 1],
+                "train_loss": training_losses[epoch - 1],
+                "validation_loss": validation_losses[epoch - 1],
+                "train_mae": math.nan,
+                "train_mse": math.nan,
+                "train_rmse": math.nan,
+                "validation_mae": math.nan,
+                "validation_mse": math.nan,
+                "validation_rmse": math.nan,
+                "pipeline_elapsed_seconds": 0,
+            }
+            for epoch in range(1, start_epoch + 1)
+        ]
+    elapsed_offset = (
+        float(metrics[-1]["pipeline_elapsed_seconds"]) if metrics else 0.0
+    )
     previous_horizon = (
         state.get("forecast_horizon")
         if args.resume and has_training_state
@@ -977,6 +1032,7 @@ def train(args: argparse.Namespace) -> None:
         training_losses.append(training["loss"])
         validation_losses.append(validation["loss"])
         elapsed = time.perf_counter() - started
+        pipeline_elapsed = elapsed_offset + elapsed
         estimated_remaining = (
             elapsed / (epoch - start_epoch) * (args.epochs - epoch)
         )
@@ -994,6 +1050,21 @@ def train(args: argparse.Namespace) -> None:
             f"val_mae={validation['mae']:.6g} "
             f"val_mse={validation['mse']:.6g} "
             f"val_rmse={validation['rmse']:.6g}"
+        )
+        metrics.append(
+            {
+                "epoch": epoch,
+                "forecast_horizon": horizon,
+                "train_loss": training["loss"],
+                "validation_loss": validation["loss"],
+                "train_mae": training["mae"],
+                "train_mse": training["mse"],
+                "train_rmse": training["rmse"],
+                "validation_mae": validation["mae"],
+                "validation_mse": validation["mse"],
+                "validation_rmse": validation["rmse"],
+                "pipeline_elapsed_seconds": pipeline_elapsed,
+            }
         )
         if validation["loss"] < best_loss:
             best_loss = validation["loss"]
@@ -1016,6 +1087,7 @@ def train(args: argparse.Namespace) -> None:
             "stale_epochs": stale_epochs,
             "training_losses": training_losses,
             "validation_losses": validation_losses,
+            "metrics": metrics,
             "python_random_state": random.getstate(),
             "numpy_random_state": np.random.get_state(),
             "torch_random_state": torch.get_rng_state(),
@@ -1040,6 +1112,10 @@ def train(args: argparse.Namespace) -> None:
             optimizer,
             state,
             pretraining,
+        )
+        write_forecast_metrics(metrics_path, metrics)
+        plot_training_losses(
+            loss_plot, training_losses, validation_losses, training, validation
         )
         if args.checkpoint_every and epoch % args.checkpoint_every == 0:
             periodic_path = checkpoint_path.with_name(
@@ -1066,24 +1142,20 @@ def train(args: argparse.Namespace) -> None:
         ):
             print(f"early stopping after {epoch} epochs")
             break
-    loss_plot = DEFAULT_GRAPH_DIR / (
-        args.loss_plot or args.checkpoint.with_suffix(".loss.png")
-    )
-    plot_training_losses(
-        loss_plot, training_losses, validation_losses, training, validation
-    )
     print(
         f"best_{args.loss}={best_loss:.6g} checkpoint={checkpoint_path} "
         f"recovery_checkpoint={recovery_path} "
-        f"loss_plot={loss_plot} "
+        f"metrics={metrics_path} loss_plot={loss_plot} "
         f"time_taken={format_duration(time.perf_counter() - started)}"
     )
 
 
 def infer(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
+    paths = artifact_paths(args.checkpoint.stem)
+    checkpoint_path = output_path(args.checkpoint, paths.checkpoint)
     model, config, zscores, checkpoint = load_checkpoint(
-        CHECKPOINT_DIR / args.checkpoint, device
+        checkpoint_path, device
     )
     training_config = dict(checkpoint["training_config"])
     training_config["batch_size"] = 1
@@ -1159,8 +1231,13 @@ def infer(args: argparse.Namespace) -> None:
     with torch.no_grad():
         prediction = zscores.denormalize_indoor(model(history, forecast))[0]
     location_index = int(sample["location_index"])
+    name = checkpoint.get("model_name", DEFAULT_MODEL)
+    default_output = (
+        paths.forecasts / f"{name}_{args.split}_sample_{args.sample_index}.png"
+    )
+    output = output_path(args.output, default_output)
     plot_prediction(
-        DEFAULT_GRAPH_DIR / args.output,
+        output,
         sample,
         prediction,
         config,
@@ -1168,7 +1245,8 @@ def infer(args: argparse.Namespace) -> None:
         args.split,
         args.sample_index,
     )
-    print(f"saved diagnostic graph: {DEFAULT_GRAPH_DIR / args.output}")
+    print(f"saved diagnostic graph: {output}")
+
 
 def _add_stream_arguments(
     parser: argparse.ArgumentParser, stream: str, patches: bool
@@ -1291,14 +1369,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--checkpoint",
-        type=output_filename,
-        default=DEFAULT_CHECKPOINT,
-        help="checkpoint file name saved under checkpoints/",
+        type=Path,
+        help="checkpoint path; defaults to inference/checkpoints/DATASET_MODEL.pt",
     )
     train_parser.add_argument(
         "--loss-plot",
-        type=output_filename,
-        help="training loss graph file name saved under graphs/",
+        type=Path,
+        help="loss graph path; defaults to inference/graphs/DATASET_MODEL.png",
+    )
+    train_parser.add_argument(
+        "--metrics-output",
+        type=Path,
+        help="metrics CSV path; defaults to inference/metrics/DATASET_MODEL.csv",
     )
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)
@@ -1383,9 +1465,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer_parser.add_argument(
         "--checkpoint",
-        type=output_filename,
+        type=Path,
         required=True,
-        help="checkpoint file name loaded from checkpoints/",
+        help="checkpoint path or file name under inference/checkpoints/",
     )
     infer_parser.add_argument(
         "--split",
@@ -1395,9 +1477,8 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--sample-index", type=int, default=0)
     infer_parser.add_argument(
         "--output",
-        type=output_filename,
-        default=Path("pm25_inference.png"),
-        help="diagnostic graph file name saved under graphs/",
+        type=Path,
+        help="forecast graph path; defaults under inference/forecasts/DATASET_MODEL/",
     )
     infer_parser.add_argument("--device", default="auto")
     infer_parser.set_defaults(function=infer)

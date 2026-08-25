@@ -3,11 +3,11 @@ from dataclasses import asdict
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import torch
 
 from evaluate_bridge_forecast import fit_linear_baseline, linear_prediction, metric_report
+from inference.artifacts import artifact_paths, dataset_model_stem
 from masked_pretraining.masking import (
     STAGES,
     TEMPO_BRIDGE_MISSING_FRACTIONS,
@@ -101,6 +101,22 @@ def _checkpoint(model_name: str, config: BridgeForecastConfig) -> dict:
 
 
 class ForecastTransferTests(unittest.TestCase):
+    def test_artifact_contract_uses_dedicated_inference_folders(self):
+        stem = dataset_model_stem(
+            Path("k12_excl_fine_t_masked_training_data.csv"),
+            "dual-encoder-cross-fusion",
+        )
+        paths = artifact_paths(stem, Path("inference"))
+
+        self.assertEqual(stem, "k12_excl_fine_t_dual-encoder-cross-fusion")
+        self.assertEqual(paths.checkpoint, Path("inference/checkpoints") / f"{stem}.pt")
+        self.assertEqual(paths.cache, Path("inference/caches") / f"{stem}.pt")
+        self.assertEqual(paths.metrics, Path("inference/metrics") / f"{stem}.csv")
+        self.assertEqual(paths.graph, Path("inference/graphs") / f"{stem}.png")
+        self.assertEqual(
+            paths.reconstructions, Path("inference/reconstructions") / stem
+        )
+
     def test_every_history_model_has_a_forecast_counterpart(self):
         config = _config()
         history = torch.randn(2, config.history_hours, 8)
@@ -269,18 +285,25 @@ class ForecastTransferTests(unittest.TestCase):
                     "--device",
                     "cpu",
                     "--checkpoint",
-                    "forecast.pt",
+                    str(root / "inference" / "checkpoints" / "training_bridge.pt"),
+                    "--metrics-output",
+                    str(root / "inference" / "metrics" / "training_bridge.csv"),
+                    "--loss-plot",
+                    str(root / "inference" / "graphs" / "training_bridge.png"),
                 ]
             )
-            with patch("pm25_transformer.CHECKPOINT_DIR", root / "checkpoints"), patch(
-                "pm25_transformer.DEFAULT_GRAPH_DIR", root / "graphs"
-            ):
-                train(args)
+            train(args)
 
             checkpoint = torch.load(
-                root / "checkpoints" / "forecast.pt",
+                root / "inference" / "checkpoints" / "training_bridge.pt",
                 map_location="cpu",
                 weights_only=False,
+            )
+            self.assertTrue(
+                (root / "inference" / "metrics" / "training_bridge.csv").is_file()
+            )
+            self.assertTrue(
+                (root / "inference" / "graphs" / "training_bridge.png").is_file()
             )
 
         self.assertEqual(

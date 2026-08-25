@@ -15,11 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CHECKPOINT_ROOT = ROOT / "inference" / "checkpoints"
 DEFAULT_DATASETS = (
     (
-        "all_excl_final",
+        "all_excl_fine_t",
         ROOT / "inputs" / "all_sensors_exclusion_informed_finetuned_masked_training_data.csv",
     ),
     (
-        "k12_excl_final",
+        "k12_excl_fine_t",
         ROOT / "inputs" / "k12_exclusion_informed_finetuned_masked_training_data.csv",
     ),
 )
@@ -35,7 +35,7 @@ def verify_family(
             raise FileNotFoundError(f"bridge training data not found: {training_data}")
         digest = file_sha256(training_data)
         for model_name in model_names():
-            path = checkpoint_root / f"bridge_training__{dataset_name}__{model_name}.pt"
+            path = checkpoint_root / f"{dataset_name}_{model_name}.pt"
             checkpoint = load_bridge_checkpoint(path)
             metadata = validate_bridge_checkpoint(checkpoint, model_name)
             if metadata.get("training_data_sha256") != digest:
