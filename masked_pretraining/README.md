@@ -59,14 +59,53 @@ The curriculum advances after validation plateaus:
 4. indoor cross-channel blocks with outdoor values visible;
 5. final 3-, 6-, and 12-hour indoor suffixes.
 
+Add the optional PurpleAir-to-TEMPO missingness bridge after that curriculum
+with `--tempo-missingness-bridge`:
+
+```powershell
+.\.venv\Scripts\python.exe -m masked_pretraining train `
+  --model dual-encoder-self-fusion-outdoor-availability `
+  --tempo-missingness-bridge
+```
+
+The bridge progressively hides 50%, 70%, and finally six-sevenths (85.7%) of
+the originally observed outdoor PurpleAir values in each window. It uses
+synthetic 6-, 12-, 24-, and 48-hour blocks and masks 15% of observed indoor
+values for reconstruction throughout. Naturally absent observations remain
+excluded from the loss. The bridge reads no TEMPO data; it only brings the
+outdoor input availability toward the downstream 24-of-168-hour floor while
+preserving known PurpleAir values as reconstruction labels.
+
+The flag works with every reconstruction model. Base models receive the same
+`-9` missing-value sentinel, availability models additionally derive the binary
+availability input, and availability-recency models additionally derive hours
+since the last model-visible outdoor value. This keeps the three model families
+directly comparable under identical synthetic gaps.
+
 `--epochs-per-stage` accepts either one value, applied uniformly to every
 selected stage, or one value per stage in `--stages` order. Without an explicit
-`--stages` list, the seven values follow the curriculum order above:
+`--stages` list, the seven values follow the base curriculum order above. With
+`--tempo-missingness-bridge`, supply one uniform value or ten values in base
+then bridge order:
 
 ```powershell
 .\.venv\Scripts\python.exe -m masked_pretraining train `
   --epochs-per-stage 30 20 20 50 20 50 50
 ```
+
+To add only the bridge to a checkpoint that completed all seven base stages:
+
+```powershell
+.\.venv\Scripts\python.exe -m masked_pretraining train `
+  --resume .\masked_pretraining\runs\checkpoints\masked_pretraining.pt `
+  --tempo-missingness-bridge `
+  --epochs-per-stage 10 `
+  --checkpoint .\masked_pretraining\runs\checkpoints\masked_pretraining_bridge.pt
+```
+
+An explicit bridge stage such as `--stages tempo_bridge_86` also requires the
+flag. Bridge checkpoint metadata records the enabled flag, exact synthetic
+fractions, and that no TEMPO data was used.
 
 Each hour has the final eight-feature contract: normalized outdoor and indoor
 PM2.5 followed by daily, weekly, and annual sine-cosine time features. Natural

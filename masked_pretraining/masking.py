@@ -15,6 +15,13 @@ STAGES = (
     "suffix_6",
     "suffix_12",
 )
+TEMPO_BRIDGE_MISSING_FRACTIONS = {
+    "tempo_bridge_50": 0.50,
+    "tempo_bridge_70": 0.70,
+    "tempo_bridge_86": 6 / 7,
+}
+TEMPO_BRIDGE_STAGES = tuple(TEMPO_BRIDGE_MISSING_FRACTIONS)
+ALL_STAGES = STAGES + TEMPO_BRIDGE_STAGES
 MASK_SENTINEL = -9.0
 
 
@@ -33,7 +40,7 @@ def mask_batch(
     generator: torch.Generator,
 ) -> MaskedBatch:
     """Replace missing values with a sentinel and target only artificial masks."""
-    if stage not in STAGES:
+    if stage not in ALL_STAGES:
         raise ValueError(f"unknown masking stage: {stage}")
     if values.shape != observed.shape or values.ndim != 3 or values.shape[-1] != 2:
         raise ValueError("values and observed must be [batch, time, 2]")
@@ -60,6 +67,17 @@ def _mask_item(
     stage: str,
     generator: torch.Generator,
 ) -> None:
+    if stage in TEMPO_BRIDGE_MISSING_FRACTIONS:
+        _add_channel_points(masked, observed, 1, 0.15, generator)
+        _add_channel_blocks(
+            masked,
+            observed,
+            0,
+            TEMPO_BRIDGE_MISSING_FRACTIONS[stage],
+            (6, 12, 24, 48),
+            generator,
+        )
+        return
     if stage == "points":
         _add_points(masked, observed, 0.15, generator)
         return
@@ -93,6 +111,45 @@ def _add_points(
     if count:
         chosen = known[torch.randperm(len(known), generator=generator)[:count]]
         masked[chosen[:, 0], chosen[:, 1]] = True
+
+
+def _add_channel_points(
+    masked: torch.Tensor,
+    observed: torch.Tensor,
+    channel: int,
+    fraction: float,
+    generator: torch.Generator,
+) -> None:
+    known = (observed[:, channel] & ~masked[:, channel]).nonzero().flatten()
+    target = math.ceil(observed[:, channel].sum().item() * fraction)
+    count = min(len(known), max(0, target - int(masked[:, channel].sum())))
+    if count:
+        chosen = known[torch.randperm(len(known), generator=generator)[:count]]
+        masked[chosen, channel] = True
+
+
+def _add_channel_blocks(
+    masked: torch.Tensor,
+    observed: torch.Tensor,
+    channel: int,
+    fraction: float,
+    lengths: tuple[int, ...],
+    generator: torch.Generator,
+) -> None:
+    target = math.ceil(observed[:, channel].sum().item() * fraction)
+    attempts = 0
+    while masked[:, channel].sum().item() < target and attempts < len(observed) * 4:
+        length = lengths[torch.randint(len(lengths), (), generator=generator).item()]
+        length = min(length, len(observed))
+        start = torch.randint(len(observed) - length + 1, (), generator=generator).item()
+        known = (
+            observed[start : start + length, channel]
+            & ~masked[start : start + length, channel]
+        ).nonzero().flatten()
+        remaining = target - int(masked[:, channel].sum())
+        masked[start + known[:remaining], channel] = True
+        attempts += 1
+    _add_channel_points(masked, observed, channel, fraction, generator)
 
 
 def _add_blocks(

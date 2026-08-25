@@ -32,7 +32,14 @@ from .diagnostics import (
     write_metrics,
     write_reconstruction_examples,
 )
-from .masking import MASK_SENTINEL, STAGES, mask_batch
+from .masking import (
+    ALL_STAGES,
+    MASK_SENTINEL,
+    STAGES,
+    TEMPO_BRIDGE_MISSING_FRACTIONS,
+    TEMPO_BRIDGE_STAGES,
+    mask_batch,
+)
 from .models import (
     DEFAULT_MODEL,
     ModelConfig,
@@ -67,7 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--layers", type=int, default=3)
     train.add_argument("--heads", type=int, default=4)
     train.add_argument("--dropout", type=float, default=0.1)
-    train.add_argument("--stages", nargs="+", choices=STAGES)
+    train.add_argument("--stages", nargs="+", choices=ALL_STAGES)
+    train.add_argument(
+        "--tempo-missingness-bridge",
+        action="store_true",
+        help=(
+            "Append synthetic outdoor-missingness stages at 50 percent, "
+            "70 percent, and "
+            "six-sevenths after the selected reconstruction curriculum."
+        ),
+    )
     train.add_argument(
         "--epochs-per-stage",
         nargs="+",
@@ -132,9 +148,7 @@ def train(args: argparse.Namespace) -> None:
     _validate_training_arguments(args)
     resume = _load_checkpoint(args.resume) if args.resume else None
     resume_metadata = resume["metadata"] if resume else None
-    stages = args.stages or (
-        [str(resume_metadata["stage"])] if resume_metadata else list(STAGES)
-    )
+    stages = _resolve_training_stages(args, resume_metadata)
     stage_epochs = _resolve_stage_epochs(args.epochs_per_stage, stages)
     _seed_everything(args.seed)
     database, training_data_sha256 = _load_database(args)
@@ -208,6 +222,7 @@ def train(args: argparse.Namespace) -> None:
     started = time.perf_counter()
     estimated_total_epochs = sum(stage_epochs)
     for stage_index, (stage, epoch_count) in enumerate(zip(stages, stage_epochs)):
+        stage_number = ALL_STAGES.index(stage) + 1
         continuing_stage = bool(
             resume_metadata and stage_index == 0 and stage == resume_metadata["stage"]
         )
@@ -222,7 +237,7 @@ def train(args: argparse.Namespace) -> None:
         )
         stale_epochs = 0
         training_masks = torch.Generator().manual_seed(
-            args.seed + (stage_index + 1) * 10_000
+            args.seed + stage_number * 10_000
         )
         best_metrics = (
             dict(resume_metadata["validation_metrics"])
@@ -240,7 +255,7 @@ def train(args: argparse.Namespace) -> None:
                 optimizer,
             )
             validation_masks = torch.Generator().manual_seed(
-                args.seed + (stage_index + 1) * 1_000_000
+                args.seed + stage_number * 1_000_000
             )
             validation_metrics = run_epoch(
                 model,
@@ -306,7 +321,7 @@ def train(args: argparse.Namespace) -> None:
                     stage,
                     normalizer,
                     device,
-                    args.seed + (stage_index + 1) * 1_000_000 + 1,
+                    args.seed + stage_number * 1_000_000 + 1,
                 )
             if stop_early:
                 break
@@ -322,7 +337,7 @@ def train(args: argparse.Namespace) -> None:
             stage,
             normalizer,
             device,
-            args.seed + (stage_index + 1) * 1_000_000 + 1,
+            args.seed + stage_number * 1_000_000 + 1,
         )
         metadata = {
             "format_version": 3,
@@ -361,6 +376,16 @@ def train(args: argparse.Namespace) -> None:
                 "outdoor_recency_is_derived_input": bool(
                     getattr(model, "outdoor_recency", False)
                 ),
+                "tempo_missingness_bridge": {
+                    "enabled": args.tempo_missingness_bridge,
+                    "synthetic_only": True,
+                    "tempo_data_used": False,
+                    "outdoor_artificial_missing_fractions": {
+                        stage_name: TEMPO_BRIDGE_MISSING_FRACTIONS[stage_name]
+                        for stage_name in stages
+                        if stage_name in TEMPO_BRIDGE_MISSING_FRACTIONS
+                    },
+                },
             },
             "diagnostics": {
                 "metrics_csv": str(diagnostics.metrics.resolve()),
@@ -513,6 +538,37 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("learning_rate, weight_decay, and minimum_delta are invalid")
     if args.reconstruction_every_epochs < 0:
         raise ValueError("reconstruction_every_epochs cannot be negative")
+    if args.stages and any(
+        stage in TEMPO_BRIDGE_STAGES for stage in args.stages
+    ) and not args.tempo_missingness_bridge:
+        raise ValueError(
+            "TEMPO bridge stages require --tempo-missingness-bridge"
+        )
+
+
+def _resolve_training_stages(
+    args: argparse.Namespace, resume_metadata: dict[str, Any] | None
+) -> list[str]:
+    if args.stages:
+        selected = list(dict.fromkeys(args.stages))
+        if args.tempo_missingness_bridge and not any(
+            stage in TEMPO_BRIDGE_STAGES for stage in selected
+        ):
+            selected.extend(TEMPO_BRIDGE_STAGES)
+        return selected
+    if not resume_metadata:
+        return list(STAGES + (TEMPO_BRIDGE_STAGES if args.tempo_missingness_bridge else ()))
+    resume_stage = str(resume_metadata["stage"])
+    if not args.tempo_missingness_bridge:
+        return [resume_stage]
+    if resume_stage in TEMPO_BRIDGE_STAGES:
+        return list(TEMPO_BRIDGE_STAGES[TEMPO_BRIDGE_STAGES.index(resume_stage) :])
+    if set(STAGES).issubset(resume_metadata.get("completed_stages", ())):
+        return list(TEMPO_BRIDGE_STAGES)
+    raise ValueError(
+        "--tempo-missingness-bridge requires a completed reconstruction curriculum "
+        "when resuming, or an explicit --stages list"
+    )
 
 
 def _resolve_stage_epochs(values: list[int], stages: list[str]) -> list[int]:
@@ -584,7 +640,7 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
     ) or not isinstance(checkpoint.get("metadata"), dict):
         raise ValueError(f"invalid masked pretraining checkpoint: {path}")
     metadata = checkpoint["metadata"]
-    if metadata.get("stage") not in STAGES or "loss" not in metadata.get(
+    if metadata.get("stage") not in ALL_STAGES or "loss" not in metadata.get(
         "validation_metrics", {}
     ):
         raise ValueError(f"masked pretraining checkpoint is incomplete: {path}")
