@@ -91,8 +91,46 @@ classified-only run:
 Omitting `--responsiveness-tiers` preserves every static interval. The audit
 and checkpoints record any intervals removed by responsiveness filtering.
 
-`--model single-self-attention-encoder` and `--model gru` use the same
-reconstruction contract.
+All eleven model selectors use the same reconstruction contract:
+
+- `single-self-attention-encoder` (default) encodes the complete eight-feature
+  history with one self-attention encoder;
+- `dual-encoder-self-fusion` independently encodes indoor PM2.5 plus time and
+  outdoor PM2.5 plus time, then jointly self-attends over both encoded streams;
+- `dual-encoder-cross-fusion` uses the same two encoders, then lets each encoded
+  PM2.5 stream cross-attend to the other without another self-attention step;
+- `separate-stream-self-fusion` independently encodes time, indoor PM2.5, and
+  outdoor PM2.5, then combines all three with self-attention only;
+- `gru` retains the recurrent baseline.
+
+Each of the three fusion architectures also has an
+`-outdoor-availability` variant:
+
+- `dual-encoder-self-fusion-outdoor-availability`;
+- `dual-encoder-cross-fusion-outdoor-availability`;
+- `separate-stream-self-fusion-outdoor-availability`.
+
+These variants derive an outdoor availability value after masking: `1` when
+the model-visible outdoor PM2.5 value is not the `-9` sentinel and `0`
+otherwise. Outdoor PM2.5 and availability are projected and encoded together.
+The dual-encoder variants then append the time features to that pair; the
+separate-stream variant keeps its time encoder independent.
+
+Each availability variant also has a cumulative
+`-outdoor-availability-recency` counterpart. Recency is normalized hours since
+the last model-visible outdoor observation. It is `0` when outdoor PM2.5 is
+currently available, increases by `1 / history_hours` across a gap, and is
+clamped to `1` before the first available value or after a full-history gap:
+
+- `dual-encoder-self-fusion-outdoor-availability-recency`;
+- `dual-encoder-cross-fusion-outdoor-availability-recency`;
+- `separate-stream-self-fusion-outdoor-availability-recency`.
+
+The transformer variants keep projections, positions, independent encoders,
+and fusion modules under the checkpoint's retained transfer prefixes. Their
+temporary indoor/outdoor reconstruction heads remain under the discarded
+prefix.
+
 Add an architecture by decorating a `ModelConfig -> nn.Module` builder with
 `register_model()` in `models.py`; it must return `[batch, time, 2]`. Future
 run artifacts are separated by type under `masked_pretraining/runs/`:

@@ -355,6 +355,12 @@ def train(args: argparse.Namespace) -> None:
                 "sentinel": MASK_SENTINEL,
                 "natural_missing_uses_sentinel": True,
                 "target_mask_is_model_input": False,
+                "outdoor_availability_is_derived_input": bool(
+                    getattr(model, "outdoor_availability", False)
+                ),
+                "outdoor_recency_is_derived_input": bool(
+                    getattr(model, "outdoor_recency", False)
+                ),
             },
             "diagnostics": {
                 "metrics_csv": str(diagnostics.metrics.resolve()),
