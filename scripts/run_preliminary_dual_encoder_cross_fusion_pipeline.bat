@@ -23,15 +23,21 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "MODEL=dual-encoder-cross-fusion"
-set "CHECKPOINT_ROOT=inference\checkpoints"
-set "GRAPH_ROOT=inference\graphs"
-set "RECONSTRUCTION_ROOT=inference\reconstructions"
+set "INFERENCE_ROOT=inference"
 set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
+set "ARTIFACT_NAME=k12_excl_fine_t_%MODEL%"
+set "CHECKPOINT=%INFERENCE_ROOT%\checkpoints\%ARTIFACT_NAME%.pt"
+set "METRICS=%INFERENCE_ROOT%\metrics\%ARTIFACT_NAME%.csv"
+set "LOSS_CURVE=%INFERENCE_ROOT%\graphs\%ARTIFACT_NAME%.png"
+set "RECONSTRUCTION_DIR=%INFERENCE_ROOT%\reconstructions\%ARTIFACT_NAME%"
+set "RECONSTRUCTION_OUTPUT=%RECONSTRUCTION_DIR%\run.reconstruction_examples.png"
 
-for %%P in ("%PYTHON%" "%K12_DATA%") do (
-    if not exist "%%~P" (
-        echo Required path not found: %%~P
-        goto :fail
+if not defined DRY_RUN (
+    for %%P in ("%PYTHON%" "%K12_DATA%") do (
+        if not exist "%%~P" (
+            echo Required path not found: %%~P
+            goto :fail
+        )
     )
 )
 
@@ -47,14 +53,14 @@ exit /b 0
 :run_pipeline
 set "DATASET=%~1"
 set "TRAINING_DATA=%~2"
-set "BASE_NAME=preliminary__base_reconstruction__%DATASET%__%MODEL%"
-set "BRIDGE_NAME=preliminary__bridge_training__%DATASET%__%MODEL%"
-set "BASE_CHECKPOINT=%CHECKPOINT_ROOT%\%BASE_NAME%.pt"
-set "BRIDGE_CHECKPOINT=%CHECKPOINT_ROOT%\%BRIDGE_NAME%.pt"
 
 echo.
 echo Dataset: %DATASET%
 echo Training data: %TRAINING_DATA%
+echo Checkpoint: %CHECKPOINT%
+echo Metrics: %METRICS%
+echo Loss graph: %LOSS_CURVE%
+echo Reconstructions: %RECONSTRUCTION_DIR%
 if not defined DRY_RUN (
     %PYTHON% -m masked_pretraining audit --training-data "%TRAINING_DATA%" >nul || exit /b 1
 )
@@ -70,13 +76,13 @@ exit /b 0
 
 :run_base_stage
 set "STAGE=%~1"
-call :stage_complete "%BASE_CHECKPOINT%" "%STAGE%"
+call :stage_complete "%CHECKPOINT%" "%STAGE%"
 if not errorlevel 1 (
     echo Skipping completed base stage: %DATASET% / %STAGE%
     exit /b 0
 )
 set "RESUME_ARGUMENT="
-if exist "%BASE_CHECKPOINT%" set "RESUME_ARGUMENT=--resume "%BASE_CHECKPOINT%""
+if exist "%CHECKPOINT%" set "RESUME_ARGUMENT=--resume "%CHECKPOINT%""
 echo Starting base stage: %DATASET% / %STAGE%
 if defined DRY_RUN exit /b 0
 %PYTHON% -m masked_pretraining train ^
@@ -86,43 +92,43 @@ if defined DRY_RUN exit /b 0
     --stages "%STAGE%" ^
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
-    --reconstruction-output "%RECONSTRUCTION_ROOT%\%BASE_NAME%.%STAGE%.png" ^
-    --loss-curve-output "%GRAPH_ROOT%\%BASE_NAME%.%STAGE%.loss_curve.png" ^
-    --skip-metrics-csv ^
+    --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
+    --loss-curve-output "%LOSS_CURVE%" ^
+    --metrics-output "%METRICS%" ^
+    --resume-metrics ^
     --final-checkpoint-only ^
     --batch-size "%BATCH_SIZE%" ^
     --workers "%WORKERS%" ^
     --device "%DEVICE%" ^
-    --checkpoint "%BASE_CHECKPOINT%"
+    --checkpoint "%CHECKPOINT%"
 exit /b %errorlevel%
 
 :run_bridge_stage
 set "STAGE=%~1"
-call :stage_complete "%BRIDGE_CHECKPOINT%" "%STAGE%"
+call :stage_complete "%CHECKPOINT%" "%STAGE%"
 if not errorlevel 1 (
     echo Skipping completed bridge stage: %DATASET% / %STAGE%
     exit /b 0
 )
-set "RESUME_CHECKPOINT=%BASE_CHECKPOINT%"
-if exist "%BRIDGE_CHECKPOINT%" set "RESUME_CHECKPOINT=%BRIDGE_CHECKPOINT%"
 echo Starting bridge stage: %DATASET% / %STAGE%
 if defined DRY_RUN exit /b 0
 %PYTHON% -m masked_pretraining train ^
     --training-data "%TRAINING_DATA%" ^
     --model "%MODEL%" ^
-    --resume "%RESUME_CHECKPOINT%" ^
+    --resume "%CHECKPOINT%" ^
     --tempo-missingness-bridge ^
     --stages "%STAGE%" ^
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
-    --reconstruction-output "%RECONSTRUCTION_ROOT%\%BRIDGE_NAME%.%STAGE%.png" ^
-    --loss-curve-output "%GRAPH_ROOT%\%BRIDGE_NAME%.%STAGE%.loss_curve.png" ^
-    --skip-metrics-csv ^
+    --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
+    --loss-curve-output "%LOSS_CURVE%" ^
+    --metrics-output "%METRICS%" ^
+    --resume-metrics ^
     --final-checkpoint-only ^
     --batch-size "%BATCH_SIZE%" ^
     --workers "%WORKERS%" ^
     --device "%DEVICE%" ^
-    --checkpoint "%BRIDGE_CHECKPOINT%"
+    --checkpoint "%CHECKPOINT%"
 exit /b %errorlevel%
 
 :stage_complete
@@ -131,7 +137,7 @@ if not exist "%~1" exit /b 1
 exit /b %errorlevel%
 
 :require_base_curriculum
-%PYTHON% -c "import sys, torch; from masked_pretraining.masking import STAGES; checkpoint=torch.load(sys.argv[1], map_location='cpu', weights_only=False); completed=checkpoint.get('metadata', {}).get('completed_stages', ()); missing=[stage for stage in STAGES if stage not in completed]; assert not missing, 'missing base stages: ' + ', '.join(missing)" "%BASE_CHECKPOINT%"
+%PYTHON% -c "import sys, torch; from masked_pretraining.masking import STAGES; checkpoint=torch.load(sys.argv[1], map_location='cpu', weights_only=False); completed=checkpoint.get('metadata', {}).get('completed_stages', ()); missing=[stage for stage in STAGES if stage not in completed]; assert not missing, 'missing base stages: ' + ', '.join(missing)" "%CHECKPOINT%"
 exit /b %errorlevel%
 
 :fail
