@@ -26,7 +26,7 @@ set "MODEL=dual-encoder-cross-fusion"
 set "CHECKPOINT_ROOT=inference\checkpoints"
 set "GRAPH_ROOT=inference\graphs"
 set "RECONSTRUCTION_ROOT=inference\reconstructions"
-set "K12_DATA=inputs\k12_exclusion_informed_finetuned_masked_training_data.csv"
+set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
 
 for %%P in ("%PYTHON%" "%K12_DATA%") do (
     if not exist "%%~P" (
