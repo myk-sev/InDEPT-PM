@@ -17,6 +17,7 @@ if not defined DEVICE set "DEVICE=auto"
 if not defined BATCH_SIZE set "BATCH_SIZE=64"
 if not defined WORKERS set "WORKERS=0"
 set "EPOCHS_PER_STAGE=30"
+set "PIPELINE_TOTAL_EPOCHS=300"
 
 set "START_DIR=%CD%"
 cd /d "%REPO_ROOT%" || exit /b 1
@@ -91,6 +92,7 @@ if defined DRY_RUN exit /b 0
     %RESUME_ARGUMENT% ^
     --stages "%STAGE%" ^
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
+    --pipeline-total-epochs "%PIPELINE_TOTAL_EPOCHS%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
     --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
     --loss-curve-output "%LOSS_CURVE%" ^
@@ -119,6 +121,7 @@ if defined DRY_RUN exit /b 0
     --tempo-missingness-bridge ^
     --stages "%STAGE%" ^
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
+    --pipeline-total-epochs "%PIPELINE_TOTAL_EPOCHS%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
     --reconstruction-output "%RECONSTRUCTION_OUTPUT%" ^
     --loss-curve-output "%LOSS_CURVE%" ^

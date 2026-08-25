@@ -27,6 +27,7 @@ from .data import (
 )
 from .diagnostics import (
     diagnostic_paths,
+    read_metrics,
     reconstruction_snapshot_path,
     write_loss_curve,
     write_metrics,
@@ -123,6 +124,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--loss-curve-output",
         type=Path,
         help="Write the training and validation loss graph to this path.",
+    )
+    train.add_argument(
+        "--metrics-output",
+        type=Path,
+        help="Write per-epoch metrics to this CSV instead of the default path.",
+    )
+    train.add_argument(
+        "--resume-metrics",
+        action="store_true",
+        help="Retain metrics for stages completed by the resume checkpoint.",
+    )
+    train.add_argument(
+        "--pipeline-total-epochs",
+        type=int,
+        metavar="N",
+        help="Estimate ETA across N epochs, including retained metrics.",
     )
     train.add_argument(
         "--skip-metrics-csv",
@@ -241,12 +258,26 @@ def train(args: argparse.Namespace) -> None:
         if resume_metadata
         else []
     )
-    metrics: list[dict[str, object]] = []
     diagnostics = diagnostic_paths(
         args.checkpoint,
         args.reconstruction_output,
         args.loss_curve_output,
         args.skip_metrics_csv,
+        args.metrics_output,
+    )
+    metrics = (
+        read_metrics(diagnostics.metrics)
+        if args.resume_metrics and diagnostics.metrics
+        else []
+    )
+    if args.resume_metrics:
+        metrics = [row for row in metrics if row["stage"] in completed]
+    metric_offset = len(metrics)
+    timed_epoch_offset = sum(
+        float(row["pipeline_elapsed_seconds"]) > 0 for row in metrics
+    )
+    elapsed_offset = (
+        float(metrics[-1]["pipeline_elapsed_seconds"]) if metrics else 0.0
     )
     if diagnostics.metrics:
         write_metrics(diagnostics.metrics, metrics)
@@ -257,7 +288,14 @@ def train(args: argparse.Namespace) -> None:
         f"validation_windows={len(validation_data)} torch_threads={args.torch_threads}"
     )
     started = time.perf_counter()
-    estimated_total_epochs = sum(stage_epochs)
+    selected_epochs = sum(stage_epochs)
+    estimated_total_epochs = (
+        args.pipeline_total_epochs or len(metrics) + selected_epochs
+    )
+    if estimated_total_epochs < len(metrics) + selected_epochs:
+        raise ValueError(
+            "pipeline_total_epochs cannot be less than retained and selected epochs"
+        )
     for stage_index, (stage, epoch_count) in enumerate(zip(stages, stage_epochs)):
         stage_number = ALL_STAGES.index(stage) + 1
         continuing_stage = bool(
@@ -328,6 +366,7 @@ def train(args: argparse.Namespace) -> None:
             else:
                 stale_epochs += 1
             stop_early = stale_epochs >= args.patience and not continuing_stage
+            pipeline_elapsed = elapsed_offset + time.perf_counter() - started
             metrics.append(
                 {
                     "global_epoch": len(metrics) + 1,
@@ -342,17 +381,18 @@ def train(args: argparse.Namespace) -> None:
                         validation_metrics["target_count"]
                     ),
                     "improved_checkpoint": improved,
+                    "pipeline_elapsed_seconds": pipeline_elapsed,
                 }
             )
             if stop_early:
                 estimated_total_epochs -= epoch_count - epoch
-            elapsed = time.perf_counter() - started
-            estimated_remaining = elapsed / len(metrics) * (
-                estimated_total_epochs - len(metrics)
+            timed_epochs = timed_epoch_offset + len(metrics) - metric_offset
+            estimated_remaining = pipeline_elapsed / timed_epochs * max(
+                estimated_total_epochs - len(metrics), 0
             )
             print(
                 f"stage={stage} epoch={epoch}/{epoch_count} "
-                f"time_taken={format_duration(elapsed)} "
+                f"time_taken={format_duration(pipeline_elapsed)} "
                 f"ETA={format_duration(estimated_remaining)} "
                 f"train_loss={train_metrics['loss']:.6f} "
                 f"validation_loss={validation_metrics['loss']:.6f} "
@@ -660,6 +700,10 @@ def _validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError("torch_threads cannot be negative")
     if args.reconstruction_every_epochs < 0:
         raise ValueError("reconstruction_every_epochs cannot be negative")
+    if args.resume_metrics and args.skip_metrics_csv:
+        raise ValueError("--resume-metrics cannot be used with --skip-metrics-csv")
+    if args.pipeline_total_epochs is not None and args.pipeline_total_epochs < 1:
+        raise ValueError("pipeline_total_epochs must be positive")
     if args.stages and any(
         stage in TEMPO_BRIDGE_STAGES for stage in args.stages
     ) and not args.tempo_missingness_bridge:

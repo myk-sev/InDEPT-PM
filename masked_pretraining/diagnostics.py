@@ -33,6 +33,7 @@ METRIC_FIELDS = (
     "train_target_count",
     "validation_target_count",
     "improved_checkpoint",
+    "pipeline_elapsed_seconds",
 )
 
 
@@ -48,6 +49,7 @@ def diagnostic_paths(
     reconstruction_output: Path | None = None,
     loss_curve_output: Path | None = None,
     skip_metrics_csv: bool = False,
+    metrics_output: Path | None = None,
 ) -> DiagnosticPaths:
     base = checkpoint.with_suffix("") if checkpoint.suffix else checkpoint
     run_directory = (
@@ -58,7 +60,7 @@ def diagnostic_paths(
     return DiagnosticPaths(
         None
         if skip_metrics_csv
-        else run_directory / "graphs" / f"{base.name}.metrics.csv",
+        else metrics_output or run_directory / "graphs" / f"{base.name}.metrics.csv",
         loss_curve_output
         or run_directory / "graphs" / f"{base.name}.loss_curve.png",
         reconstruction_output
@@ -81,6 +83,33 @@ def write_metrics(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writeheader()
         writer.writerows(rows)
     os.replace(temporary, path)
+
+
+def read_metrics(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    for row in rows:
+        for field in (
+            "global_epoch",
+            "stage_epoch",
+            "train_target_count",
+            "validation_target_count",
+        ):
+            row[field] = int(row[field])
+        for field in (
+            "train_loss",
+            "validation_loss",
+            "validation_indoor_rmse",
+            "validation_outdoor_rmse",
+        ):
+            row[field] = float(row[field])
+        row["pipeline_elapsed_seconds"] = float(
+            row.get("pipeline_elapsed_seconds") or 0.0
+        )
+        row["improved_checkpoint"] = row["improved_checkpoint"] == "True"
+    return rows
 
 
 def write_loss_curve(path: Path, rows: list[dict[str, object]]) -> None:
