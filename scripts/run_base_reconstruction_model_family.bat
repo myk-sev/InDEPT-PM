@@ -29,8 +29,8 @@ set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
 set "METRICS_ROOT=%INFERENCE_ROOT%\metrics"
 set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
 set "RECONSTRUCTION_ROOT=%INFERENCE_ROOT%\reconstructions"
-set "ALL_DATA=inputs\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
-set "K12_DATA=inputs\k12_exclusion_informed_finetuned_masked_training_data.csv"
+set "ALL_DATA=inputs\reconstruction\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
+set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
 
 if not defined DRY_RUN (
     for %%P in ("%PYTHON%" "%ALL_DATA%" "%K12_DATA%") do (
