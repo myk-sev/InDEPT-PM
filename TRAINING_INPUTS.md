@@ -17,8 +17,8 @@ The repository keeps source data and model-ready inputs separate:
 
 ## Final training inputs
 
-- `inputs/unmasked_type/old_training_data.csv` and
-  `inputs/unmasked_type/school_old_training_data.csv`: model-ready exports from
+- `inputs/forecasting/old_training_data.csv` and
+  `inputs/forecasting/school_old_training_data.csv`: model-ready exports from
   the legacy forecasting pipeline.
 - `inputs/masked_pretraining/exclusion_aware/k12_exclusion_aware_masked_training_data.csv`:
   default K-12 contract.
@@ -64,6 +64,6 @@ training time.
 - `model_aware_training_balance/build_training_index.py`: writes the final
   forecasting balance index.
 - `export_old_training_csv.py`: generates a model-ready forecasting CSV; the
-  current finalized exports are organized under `inputs/unmasked_type/`.
+  current finalized exports are organized under `inputs/forecasting/`.
 - `extract_old_training_purpleair.py`: reconstructs raw PurpleAir history under
   `data/purple air` from the legacy model-ready CSV.

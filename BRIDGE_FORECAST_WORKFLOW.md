@@ -15,7 +15,7 @@ Supervised forecasting reads:
 
 - the completed bridge checkpoint;
 - the matching materialized cyclical forecasting CSV under
-  `inputs\unmasked_type`; and
+  `inputs\forecasting`; and
 - no raw TEMPO, NAQFC, PurpleAir, exclusion, or pair files at runtime.
 
 The materialized forecasting CSV contains the TEMPO history, NAQFC future
@@ -97,7 +97,7 @@ The trainer selects the matching `bridge-forecast-*` model automatically when
 ```bat
 .venv\Scripts\python.exe pm25_transformer.py train ^
   --pretrained-checkpoint inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt ^
-  --training-data inputs\unmasked_type\k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical.csv ^
+  --training-data inputs\forecasting\k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical.csv ^
   --history-initialization pretrained ^
   --epochs 50 ^
   --freeze-history-epochs 3 ^

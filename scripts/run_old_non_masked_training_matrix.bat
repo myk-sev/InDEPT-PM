@@ -21,8 +21,8 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "TRAINER=pm25_transformer.py"
-set "LINEAR_DATA=inputs\unmasked_type\old_training_data.csv"
-set "CYCLICAL_DATA=inputs\unmasked_type\old_training_data_cyclical.csv"
+set "LINEAR_DATA=inputs\forecasting\old_training_data.csv"
+set "CYCLICAL_DATA=inputs\forecasting\old_training_data_cyclical.csv"
 set "LINEAR_CACHE=inference\caches\keller_elementary_school_cache.pt"
 set "CYCLICAL_CACHE=inference\caches\keller_elementary_school_cache_cyclical.pt"
 if not exist "%LINEAR_CACHE%" set "LINEAR_CACHE=inference\keller_elementary_school_cache.pt"

@@ -453,7 +453,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--history-hours", type=int, default=168)
     parser.add_argument("--prediction-hours", type=int, default=36)
     parser.add_argument("--minimum-outdoor-history-hours", type=int, default=24)
-    parser.add_argument("--train-fraction", type=float, default=0.70)
+    parser.add_argument("--train-fraction", type=float, default=0.75)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
     parser.add_argument("--location-holdout-fraction", type=float, default=0.20)
     parser.add_argument("--max-hours-per-episode", type=int, default=1)

@@ -36,14 +36,14 @@ for %%P in (
     "%TRAINER%"
     "%LINEAR_CACHE%"
     "%CYCLICAL_CACHE%"
-    "inputs\unmasked_type\balanced_old_training_data.csv"
-    "inputs\unmasked_type\balanced_old_training_data_cyclical.csv"
-    "inputs\unmasked_type\non_school_old_training_data_exclusion_aware.csv"
-    "inputs\unmasked_type\non_school_old_training_data_exclusion_aware_cyclical.csv"
-    "inputs\unmasked_type\school_old_training_data.csv"
-    "inputs\unmasked_type\school_old_training_data_cyclical.csv"
-    "inputs\unmasked_type\school_old_training_data_exclusion_aware.csv"
-    "inputs\unmasked_type\school_old_training_data_exclusion_aware_cyclical.csv"
+    "inputs\forecasting\balanced_old_training_data.csv"
+    "inputs\forecasting\balanced_old_training_data_cyclical.csv"
+    "inputs\forecasting\non_school_old_training_data_exclusion_aware.csv"
+    "inputs\forecasting\non_school_old_training_data_exclusion_aware_cyclical.csv"
+    "inputs\forecasting\school_old_training_data.csv"
+    "inputs\forecasting\school_old_training_data_cyclical.csv"
+    "inputs\forecasting\school_old_training_data_exclusion_aware.csv"
+    "inputs\forecasting\school_old_training_data_exclusion_aware_cyclical.csv"
 ) do (
     if not exist "%%~P" (
         echo Required path not found: %%~P
@@ -51,10 +51,10 @@ for %%P in (
     )
 )
 
-call :run_dataset "balanced" "inputs\unmasked_type\balanced_old_training_data.csv" "inputs\unmasked_type\balanced_old_training_data_cyclical.csv" || goto :fail
-call :run_dataset "non_school_excl_aware" "inputs\unmasked_type\non_school_old_training_data_exclusion_aware.csv" "inputs\unmasked_type\non_school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
-call :run_dataset "school" "inputs\unmasked_type\school_old_training_data.csv" "inputs\unmasked_type\school_old_training_data_cyclical.csv" || goto :fail
-call :run_dataset "school_excl_aware" "inputs\unmasked_type\school_old_training_data_exclusion_aware.csv" "inputs\unmasked_type\school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
+call :run_dataset "balanced" "inputs\forecasting\balanced_old_training_data.csv" "inputs\forecasting\balanced_old_training_data_cyclical.csv" || goto :fail
+call :run_dataset "non_school_excl_aware" "inputs\forecasting\non_school_old_training_data_exclusion_aware.csv" "inputs\forecasting\non_school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
+call :run_dataset "school" "inputs\forecasting\school_old_training_data.csv" "inputs\forecasting\school_old_training_data_cyclical.csv" || goto :fail
+call :run_dataset "school_excl_aware" "inputs\forecasting\school_old_training_data_exclusion_aware.csv" "inputs\forecasting\school_old_training_data_exclusion_aware_cyclical.csv" || goto :fail
 
 cd /d "%START_DIR%"
 exit /b 0

@@ -406,7 +406,7 @@ def create_singular_data_loaders(
 def create_data_loaders(
     dataset: DualEncoderDataset,
     batch_size: int = 64,
-    train_fraction: float = 0.70,
+    train_fraction: float = 0.75,
     validation_fraction: float = 0.15,
     location_holdout_fraction: float = 0.20,
     seed: int = 42,

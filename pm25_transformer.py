@@ -1415,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--gradient-clip", type=float, default=1.0)
     train_parser.add_argument("--loss", choices=("mae", "mse", "huber"), default="mse")
     train_parser.add_argument("--huber-delta", type=float, default=1.0)
-    train_parser.add_argument("--train-fraction", type=float, default=0.70)
+    train_parser.add_argument("--train-fraction", type=float, default=0.75)
     train_parser.add_argument("--validation-fraction", type=float, default=0.15)
     train_parser.add_argument(
         "--location-holdout-fraction", type=float, default=0.20

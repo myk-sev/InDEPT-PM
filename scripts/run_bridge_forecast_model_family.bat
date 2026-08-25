@@ -30,8 +30,8 @@ set "FORECAST_ROOT=%INFERENCE_ROOT%\forecasts"
 set "EVALUATION_ROOT=%INFERENCE_ROOT%\evaluations"
 set "CACHE=inference\caches\keller_elementary_school_cache_cyclical.pt"
 if not exist "%CACHE%" set "CACHE=inference\keller_elementary_school_cache_cyclical.pt"
-set "ALL_DATA=inputs\unmasked_type\all_old_training_data_exclusion_informed_finetuned_cyclical.csv"
-set "K12_DATA=inputs\unmasked_type\k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical.csv"
+set "ALL_DATA=inputs\forecasting\all_old_training_data_exclusion_informed_finetuned_cyclical.csv"
+set "K12_DATA=inputs\forecasting\k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical.csv"
 
 if not defined DRY_RUN (
     for %%P in ("%PYTHON%" "%TRAINER%" "%EVALUATOR%" "%CACHE%" "%ALL_DATA%" "%K12_DATA%") do (
