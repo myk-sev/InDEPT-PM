@@ -1,0 +1,113 @@
+@echo off
+setlocal
+set "REPO_ROOT=%~dp0.."
+
+rem Usage: scripts\run_bridge_training_model_family.bat [device] [epochs_per_stage] [batch_size] [workers]
+rem Add --dry-run first to print the 22-run bridge matrix without starting training.
+if /i "%~1"=="--dry-run" (
+    set "DRY_RUN=1"
+    shift
+)
+
+set "DEVICE=%~1"
+set "EPOCHS_PER_STAGE=%~2"
+set "BATCH_SIZE=%~3"
+set "WORKERS=%~4"
+if not defined DEVICE set "DEVICE=auto"
+if not defined EPOCHS_PER_STAGE set "EPOCHS_PER_STAGE=20"
+if not defined BATCH_SIZE set "BATCH_SIZE=64"
+if not defined WORKERS set "WORKERS=0"
+
+set "START_DIR=%CD%"
+cd /d "%REPO_ROOT%" || exit /b 1
+
+set "PYTHON=.venv\Scripts\python.exe"
+set "BASE_ROOT=masked_pretraining\runs\base_reconstruction"
+set "OUTPUT_ROOT=masked_pretraining\runs\bridge_training"
+set "ALL_DATA=inputs\reconstruction\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
+set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
+
+for %%P in ("%PYTHON%" "%ALL_DATA%" "%K12_DATA%") do (
+    if not exist "%%~P" (
+        echo Required path not found: %%~P
+        goto :fail
+    )
+)
+
+if not defined DRY_RUN (
+    set "CHECKPOINT_COUNT=0"
+    call :preflight_dataset "all_excl_final" "%ALL_DATA%" || goto :fail
+    call :preflight_dataset "k12_excl_final" "%K12_DATA%" || goto :fail
+    echo Verified %CHECKPOINT_COUNT% complete base checkpoints.
+)
+
+set "TRAINING_COUNT=0"
+call :run_dataset "all_excl_final" "%ALL_DATA%" || goto :fail
+call :run_dataset "k12_excl_final" "%K12_DATA%" || goto :fail
+
+echo Completed %TRAINING_COUNT% bridge training runs.
+cd /d "%START_DIR%"
+exit /b 0
+
+:preflight_dataset
+set "DATASET=%~1"
+set "TRAINING_DATA=%~2"
+for /f "delims=" %%M in ('%PYTHON% -c "from masked_pretraining.models import model_names; print(*model_names(), sep='\n')"') do (
+    call :check_base_checkpoint "%%M" || exit /b 1
+)
+exit /b 0
+
+:check_base_checkpoint
+set "MODEL=%~1"
+set "BASE_CHECKPOINT=%BASE_ROOT%\%DATASET%\%MODEL%\checkpoints\run.pt"
+if not exist "%BASE_CHECKPOINT%" (
+    echo Base checkpoint not found: %BASE_CHECKPOINT%
+    exit /b 1
+)
+%PYTHON% -c "import sys, torch; from pathlib import Path; from masked_pretraining.data import file_sha256; from masked_pretraining.masking import STAGES; checkpoint=torch.load(sys.argv[1], map_location='cpu', weights_only=False); metadata=checkpoint.get('metadata', {}); missing=[stage for stage in STAGES if stage not in metadata.get('completed_stages', ())]; assert not missing, 'missing base stages: ' + ', '.join(missing); assert metadata.get('model_name') == sys.argv[2], 'model mismatch'; assert metadata.get('training_data_sha256') == file_sha256(Path(sys.argv[3])), 'training-data hash mismatch'; assert 'optimizer_state' in checkpoint, 'optimizer state missing'" "%BASE_CHECKPOINT%" "%MODEL%" "%TRAINING_DATA%"
+if errorlevel 1 exit /b 1
+set /a CHECKPOINT_COUNT+=1 >nul
+exit /b 0
+
+:run_dataset
+set "DATASET=%~1"
+set "TRAINING_DATA=%~2"
+echo Dataset: %DATASET%
+echo Training data: %TRAINING_DATA%
+for /f "delims=" %%M in ('%PYTHON% -c "from masked_pretraining.models import model_names; print(*model_names(), sep='\n')"') do (
+    call :run_model "%%M" || exit /b 1
+)
+exit /b 0
+
+:run_model
+set "MODEL=%~1"
+set "BASE_CHECKPOINT=%BASE_ROOT%\%DATASET%\%MODEL%\checkpoints\run.pt"
+set "RUN_ROOT=%OUTPUT_ROOT%\%DATASET%\%MODEL%"
+set /a TRAINING_COUNT+=1 >nul
+echo.
+echo Starting bridge: %DATASET% / %MODEL%
+echo Base checkpoint: %BASE_CHECKPOINT%
+echo Bridge artifacts: %RUN_ROOT%
+if defined DRY_RUN exit /b 0
+
+%PYTHON% -m masked_pretraining train ^
+    --training-data "%TRAINING_DATA%" ^
+    --model "%MODEL%" ^
+    --resume "%BASE_CHECKPOINT%" ^
+    --tempo-missingness-bridge ^
+    --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
+    --patience "%EPOCHS_PER_STAGE%" ^
+    --reconstruction-every-epochs 5 ^
+    --batch-size "%BATCH_SIZE%" ^
+    --workers "%WORKERS%" ^
+    --device "%DEVICE%" ^
+    --checkpoint "%RUN_ROOT%\checkpoints\run.pt"
+if errorlevel 1 (
+    echo Bridge training failed for %DATASET% / %MODEL%.
+    exit /b 1
+)
+exit /b 0
+
+:fail
+cd /d "%START_DIR%"
+exit /b 1

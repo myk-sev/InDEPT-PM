@@ -23,8 +23,8 @@ cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
 set "OUTPUT_ROOT=masked_pretraining\runs\base_reconstruction"
-set "ALL_DATA=inputs\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
-set "K12_DATA=inputs\k12_exclusion_informed_finetuned_masked_training_data.csv"
+set "ALL_DATA=inputs\reconstruction\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
+set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
 
 for %%P in ("%PYTHON%" "%ALL_DATA%" "%K12_DATA%") do (
     if not exist "%%~P" (
