@@ -38,7 +38,8 @@ It writes eleven architectures for each cohort. Every artifact uses the same
 `<dataset>_<model>` stem: checkpoints go to `inference\checkpoints`, metrics to
 `inference\metrics`, cumulative loss graphs to `inference\graphs`, and the
 multiple stage/epoch reconstruction images to a matching folder under
-`inference\reconstructions`.
+`inference\reconstructions`. Final reconstruction and bridge statistics go to
+`inference\reports\<dataset_model>.csv`.
 
 ## 2. Inspect and run the bridge matrix
 
@@ -89,6 +90,12 @@ Every successful training run must also complete:
 
 Failure of training, inference, or evaluation stops the matrix.
 
+Before the trainer exits, it reloads the selected validation-best checkpoint
+and writes `inference\reports\<dataset_model>.csv`. The CSV has one row for
+each validation, temporal-test, and location-test horizon at 3, 6, 12, 24, and
+36 hours. It includes cumulative and exact-lead RMSE, MAE, bias, persistence
+RMSE, skill versus persistence, sample counts, and checkpoint/data hashes.
+
 ## One-model command
 
 The trainer selects the matching `bridge-forecast-*` model automatically when
@@ -125,8 +132,10 @@ and reconstruction folder. For example:
 inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt
 inference\metrics\k12_excl_fine_t_dual-encoder-cross-fusion.csv
 inference\graphs\k12_excl_fine_t_dual-encoder-cross-fusion.png
+inference\reports\k12_excl_fine_t_dual-encoder-cross-fusion.csv
 inference\reconstructions\k12_excl_fine_t_dual-encoder-cross-fusion\*.png
 inference\forecasts\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained\*.png
+inference\reports\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.csv
 inference\evaluations\k12_excl_fine_t_bridge-forecast-dual-encoder-cross-fusion-pretrained.json
 ```
 

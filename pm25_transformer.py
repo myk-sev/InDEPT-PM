@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from inference.artifacts import artifact_paths, dataset_model_stem
+from inference.reporting import write_csv_report
 
 from data_loader import (
     PERMANENT_EXCLUSIONS_PATH,
@@ -57,6 +58,7 @@ FORECAST_METRIC_FIELDS = (
     "validation_rmse",
     "pipeline_elapsed_seconds",
 )
+FINAL_REPORT_HORIZONS = (3, 6, 12, 24, 36)
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,158 @@ def run_epoch(
         "mse": mse,
         "rmse": math.sqrt(mse),
     }
+
+
+def evaluate_forecast_split(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    zscores: ZScores,
+    device: torch.device,
+    horizons: list[int],
+) -> dict:
+    model.eval()
+    totals = {
+        method: {
+            metric: torch.zeros(horizons[-1], dtype=torch.float64, device=device)
+            for metric in ("error", "absolute", "squared")
+        }
+        for method in ("model", "persistence")
+    }
+    samples = 0
+    with torch.inference_mode():
+        for batch in loader:
+            history, forecast, _ = normalize_batch(batch, zscores, device)
+            target = batch["target"].to(device).double()[..., : horizons[-1]]
+            predictions = {
+                "model": zscores.denormalize_indoor(
+                    model(history, forecast)
+                ).double()[..., : horizons[-1]],
+                "persistence": batch["history"][:, -1, 1]
+                .to(device)
+                .double()[:, None]
+                .expand_as(target),
+            }
+            for method, prediction in predictions.items():
+                error = prediction - target
+                totals[method]["error"] += error.sum(dim=0)
+                totals[method]["absolute"] += error.abs().sum(dim=0)
+                totals[method]["squared"] += error.square().sum(dim=0)
+            samples += target.shape[0]
+    if not samples:
+        raise ValueError("data loader contains no samples")
+
+    report = {
+        method: _forecast_metrics(values, samples, horizons)
+        for method, values in totals.items()
+    }
+    for horizon in horizons:
+        model_rmse = report["model"]["by_horizon"][str(horizon)]["rmse"]
+        persistence_rmse = report["persistence"]["by_horizon"][str(horizon)][
+            "rmse"
+        ]
+        report["model"]["by_horizon"][str(horizon)][
+            "rmse_skill_vs_persistence"
+        ] = 1 - model_rmse / persistence_rmse if persistence_rmse else None
+    return {"samples": samples, **report}
+
+
+def _forecast_metrics(
+    totals: dict[str, torch.Tensor], samples: int, horizons: list[int]
+) -> dict:
+    by_horizon = {}
+    for horizon in horizons:
+        values = samples * horizon
+        mse = totals["squared"][:horizon].sum().item() / values
+        by_horizon[str(horizon)] = {
+            "mae": totals["absolute"][:horizon].sum().item() / values,
+            "mse": mse,
+            "rmse": math.sqrt(mse),
+            "bias": totals["error"][:horizon].sum().item() / values,
+            "values": values,
+        }
+    by_lead = []
+    for lead in range(horizons[-1]):
+        mse = totals["squared"][lead].item() / samples
+        by_lead.append(
+            {
+                "forecast_hour": lead + 1,
+                "mae": totals["absolute"][lead].item() / samples,
+                "mse": mse,
+                "rmse": math.sqrt(mse),
+                "bias": totals["error"][lead].item() / samples,
+            }
+        )
+    return {"by_horizon": by_horizon, "by_lead": by_lead}
+
+
+def write_forecast_final_report(
+    path: Path,
+    checkpoint_path: Path,
+    loaders: DualEncoderLoaders,
+    device: torch.device,
+) -> dict:
+    model, config, zscores, checkpoint = load_checkpoint(checkpoint_path, device)
+    horizons = [
+        horizon
+        for horizon in FINAL_REPORT_HORIZONS
+        if horizon <= config.prediction_hours
+    ]
+    if not horizons or horizons[-1] != config.prediction_hours:
+        horizons.append(config.prediction_hours)
+    splits = {
+        name: evaluate_forecast_split(
+            model, getattr(loaders, name), zscores, device, horizons
+        )
+        for name in ("validation", "temporal_test", "location_test")
+    }
+    training_config = checkpoint["training_config"]
+    generated_at = datetime.now(timezone.utc).isoformat()
+    checkpoint_sha256 = file_sha256(checkpoint_path)
+    rows = []
+    for split, statistics in splits.items():
+        for horizon in horizons:
+            model_metrics = statistics["model"]["by_horizon"][str(horizon)]
+            persistence = statistics["persistence"]["by_horizon"][str(horizon)]
+            rows.append(
+                {
+                    "generated_at_utc": generated_at,
+                    "model_name": checkpoint["model_name"],
+                    "split": split,
+                    "horizon_hours": horizon,
+                    "samples": statistics["samples"],
+                    "values": model_metrics["values"],
+                    "model_rmse_1_to_h_ug_m3": model_metrics["rmse"],
+                    "model_rmse_at_h_ug_m3": statistics["model"]["by_lead"][
+                        horizon - 1
+                    ]["rmse"],
+                    "model_mae_1_to_h_ug_m3": model_metrics["mae"],
+                    "model_bias_1_to_h_ug_m3": model_metrics["bias"],
+                    "persistence_rmse_1_to_h_ug_m3": persistence["rmse"],
+                    "persistence_rmse_at_h_ug_m3": statistics["persistence"][
+                        "by_lead"
+                    ][horizon - 1]["rmse"],
+                    "rmse_skill_vs_persistence_pct": (
+                        model_metrics["rmse_skill_vs_persistence"] * 100
+                        if model_metrics["rmse_skill_vs_persistence"] is not None
+                        else ""
+                    ),
+                    "selected_epoch": checkpoint["epoch"],
+                    "selection_split": "validation",
+                    "selection_metric": training_config["loss"],
+                    "normalized_validation_loss": checkpoint["validation_loss"],
+                    "history_initialization": training_config.get(
+                        "history_initialization"
+                    ),
+                    "checkpoint_path": str(checkpoint_path.resolve()),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "training_data_path": training_config.get("training_data"),
+                    "training_data_sha256": training_config.get(
+                        "training_data_sha256"
+                    ),
+                }
+            )
+    write_csv_report(path, tuple(rows[0]), rows)
+    return {"reported_horizons_hours": horizons, "final_model_metrics": splits}
 
 
 def save_checkpoint(
@@ -769,6 +923,7 @@ def train(args: argparse.Namespace) -> None:
     checkpoint_path = output_path(args.checkpoint, paths.checkpoint)
     metrics_path = output_path(args.metrics_output, paths.metrics)
     loss_plot = output_path(args.loss_plot, paths.graph)
+    report_path = output_path(args.report_output, paths.report)
     recovery_path = recovery_checkpoint_path(checkpoint_path)
     training_config = {
         "model": args.model,
@@ -1142,10 +1297,25 @@ def train(args: argparse.Namespace) -> None:
         ):
             print(f"early stopping after {epoch} epochs")
             break
+    del model, optimizer
+    if args.resume:
+        del checkpoint
+    final_report = write_forecast_final_report(
+        report_path, checkpoint_path, loaders, device
+    )
+    for split, statistics in final_report["final_model_metrics"].items():
+        by_horizon = statistics["model"]["by_horizon"]
+        print(
+            f"final_statistics split={split} "
+            + " ".join(
+                f"rmse_{horizon}h={by_horizon[str(horizon)]['rmse']:.3f}"
+                for horizon in final_report["reported_horizons_hours"]
+            )
+        )
     print(
         f"best_{args.loss}={best_loss:.6g} checkpoint={checkpoint_path} "
         f"recovery_checkpoint={recovery_path} "
-        f"metrics={metrics_path} loss_plot={loss_plot} "
+        f"metrics={metrics_path} loss_plot={loss_plot} report={report_path} "
         f"time_taken={format_duration(time.perf_counter() - started)}"
     )
 
@@ -1381,6 +1551,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics-output",
         type=Path,
         help="metrics CSV path; defaults to inference/metrics/DATASET_MODEL.csv",
+    )
+    train_parser.add_argument(
+        "--report-output",
+        type=Path,
+        help="final statistics CSV; defaults to inference/reports/DATASET_MODEL.csv",
     )
     train_parser.add_argument("--history-hours", type=int, default=168)
     train_parser.add_argument("--prediction-hours", type=int, default=36)

@@ -184,6 +184,8 @@ runs derive `<dataset>_<model>` from the training CSV and model name, then write
 - `inference/checkpoints/<dataset_model>.pt`;
 - `inference/metrics/<dataset_model>.csv`;
 - `inference/graphs/<dataset_model>.png`;
+- `inference/reports/<dataset_model>.csv`: final statistics by reconstruction
+  and bridge stage;
 - `inference/reconstructions/<dataset_model>/`: stage/epoch validation images.
 
 Each run writes:
@@ -200,6 +202,9 @@ Each run writes:
 The metrics CSV and loss graph are refreshed after every epoch. After each
 masking-stage block, the reconstruction plot uses that block's lowest-validation
 epoch (20 epochs by default). Its absolute path is stored in checkpoint metadata.
+After the final stage, the trainer writes one report row per completed stage
+with indoor/outdoor RMSE in ug/m3, normalized validation loss, validation target
+count, selected epoch, stage type, and checkpoint/data hashes.
 
 To refresh the reconstruction plot during a stage, set an epoch interval:
 

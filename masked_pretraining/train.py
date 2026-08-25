@@ -8,6 +8,7 @@ import random
 import tempfile
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from inference.artifacts import artifact_paths, dataset_model_stem
+from inference.reporting import write_csv_report
 
 from .data import (
     Normalizer,
@@ -130,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics-output",
         type=Path,
         help="Write per-epoch metrics to this CSV instead of the default path.",
+    )
+    train.add_argument(
+        "--report-output",
+        type=Path,
+        help="Write final statistics CSV to this path.",
     )
     train.add_argument(
         "--resume-metrics",
@@ -274,6 +281,7 @@ def train(args: argparse.Namespace) -> None:
         args.skip_metrics_csv,
         args.metrics_output,
     )
+    report_path = args.report_output or artifact_paths(args.checkpoint.stem).report
     retain_metrics = bool(args.resume or args.resume_metrics)
     metrics = (
         read_metrics(diagnostics.metrics)
@@ -560,7 +568,84 @@ def train(args: argparse.Namespace) -> None:
         )
         if args.final_checkpoint_only:
             print(f"saved={args.checkpoint}")
-    print(f"final_checkpoint={args.checkpoint}")
+    report = write_masked_final_report(
+        report_path, args.checkpoint, args.training_data, metadata, metrics
+    )
+    final_row = next(row for row in report if row["is_final_stage"])
+    print(
+        f"final_statistics stage={final_row['stage']} "
+        f"indoor_rmse={final_row['indoor_rmse_ug_m3']:.3f} "
+        f"outdoor_rmse={final_row['outdoor_rmse_ug_m3']:.3f}"
+    )
+    print(f"final_checkpoint={args.checkpoint} report={report_path}")
+
+
+def write_masked_final_report(
+    path: Path,
+    checkpoint_path: Path,
+    training_data: Path,
+    metadata: dict[str, Any],
+    metrics: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    checkpoint_sha256 = file_sha256(checkpoint_path)
+    rows = []
+    for stage in metadata["completed_stages"]:
+        candidates = [row for row in metrics if row["stage"] == stage]
+        selected = [row for row in candidates if row["improved_checkpoint"]]
+        best = selected[-1] if selected else (
+            min(candidates, key=lambda row: float(row["validation_loss"]))
+            if candidates
+            else None
+        )
+        final_stage = stage == metadata["stage"]
+        validation = metadata["validation_metrics"] if final_stage else None
+        rows.append(
+            {
+                "generated_at_utc": generated_at,
+                "model_name": metadata["model_name"],
+                "stage": stage,
+                "stage_type": (
+                    "bridge" if stage in TEMPO_BRIDGE_STAGES else "reconstruction"
+                ),
+                "best_epoch": int(best["stage_epoch"]) if best else "",
+                "indoor_rmse_ug_m3": (
+                    float(validation["indoor_rmse"])
+                    if validation
+                    else float(best["validation_indoor_rmse"])
+                    if best
+                    else ""
+                ),
+                "outdoor_rmse_ug_m3": (
+                    float(validation["outdoor_rmse"])
+                    if validation
+                    else float(best["validation_outdoor_rmse"])
+                    if best
+                    else ""
+                ),
+                "validation_loss_normalized": (
+                    float(validation["loss"])
+                    if validation
+                    else float(best["validation_loss"])
+                    if best
+                    else ""
+                ),
+                "validation_target_count": (
+                    int(validation["target_count"])
+                    if validation
+                    else int(best["validation_target_count"])
+                    if best
+                    else ""
+                ),
+                "is_final_stage": final_stage,
+                "checkpoint_path": str(checkpoint_path.resolve()),
+                "checkpoint_sha256": checkpoint_sha256,
+                "training_data_path": str(training_data.resolve()),
+                "training_data_sha256": metadata["training_data_sha256"],
+            }
+        )
+    write_csv_report(path, tuple(rows[0]), rows)
+    return rows
 
 
 def run_epoch(

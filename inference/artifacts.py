@@ -15,6 +15,7 @@ class ArtifactPaths:
     cache: Path
     metrics: Path
     graph: Path
+    report: Path
     reconstructions: Path
     forecasts: Path
     evaluation: Path
@@ -35,6 +36,7 @@ def artifact_paths(stem: str, root: Path = INFERENCE_ROOT) -> ArtifactPaths:
         cache=root / "caches" / f"{stem}.pt",
         metrics=root / "metrics" / f"{stem}.csv",
         graph=root / "graphs" / f"{stem}.png",
+        report=root / "reports" / f"{stem}.csv",
         reconstructions=root / "reconstructions" / stem,
         forecasts=root / "forecasts" / stem,
         evaluation=root / "evaluations" / f"{stem}.json",

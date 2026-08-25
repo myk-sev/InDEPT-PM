@@ -18,6 +18,7 @@ from masked_pretraining.models import (
     build_model as build_history_model,
     model_names as history_model_names,
 )
+from masked_pretraining.train import write_masked_final_report
 from pm25_models import (
     BridgeForecastConfig,
     bridge_forecast_name,
@@ -113,6 +114,7 @@ class ForecastTransferTests(unittest.TestCase):
         self.assertEqual(paths.cache, Path("inference/caches") / f"{stem}.pt")
         self.assertEqual(paths.metrics, Path("inference/metrics") / f"{stem}.csv")
         self.assertEqual(paths.graph, Path("inference/graphs") / f"{stem}.png")
+        self.assertEqual(paths.report, Path("inference/reports") / f"{stem}.csv")
         self.assertEqual(
             paths.reconstructions, Path("inference/reconstructions") / stem
         )
@@ -290,6 +292,8 @@ class ForecastTransferTests(unittest.TestCase):
                     str(root / "inference" / "metrics" / "training_bridge.csv"),
                     "--loss-plot",
                     str(root / "inference" / "graphs" / "training_bridge.png"),
+                    "--report-output",
+                    str(root / "inference" / "reports" / "training_bridge.csv"),
                 ]
             )
             train(args)
@@ -305,6 +309,19 @@ class ForecastTransferTests(unittest.TestCase):
             self.assertTrue(
                 (root / "inference" / "graphs" / "training_bridge.png").is_file()
             )
+            with (
+                root / "inference" / "reports" / "training_bridge.csv"
+            ).open(encoding="utf-8", newline="") as source:
+                report = list(csv.DictReader(source))
+            self.assertEqual(len(report), 6)
+            self.assertEqual(
+                {(row["split"], row["horizon_hours"]) for row in report},
+                {
+                    (split, horizon)
+                    for split in ("validation", "temporal_test", "location_test")
+                    for horizon in ("3", "6")
+                },
+            )
 
         self.assertEqual(
             checkpoint["model_name"],
@@ -312,6 +329,66 @@ class ForecastTransferTests(unittest.TestCase):
         )
         self.assertTrue(checkpoint["pretraining"]["weights_loaded"])
         self.assertEqual(checkpoint["training_config"]["forecast_horizons"], [6])
+
+    def test_masked_report_contains_reconstruction_and_bridge_stages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.pt"
+            training_data = root / "training.csv"
+            checkpoint.write_bytes(b"checkpoint")
+            training_data.write_text("training", encoding="utf-8")
+            metadata = {
+                "model_name": "dual-encoder-cross-fusion",
+                "completed_stages": ["points", "tempo_bridge_50"],
+                "stage": "tempo_bridge_50",
+                "validation_metrics": {
+                    "loss": 0.2,
+                    "indoor_rmse": 2.5,
+                    "outdoor_rmse": 3.5,
+                    "target_count": 200,
+                },
+                "training_data_sha256": "data-hash",
+            }
+            metrics = [
+                {
+                    "global_epoch": 1,
+                    "stage": "points",
+                    "stage_epoch": 1,
+                    "train_loss": 0.3,
+                    "validation_loss": 0.25,
+                    "validation_indoor_rmse": 2.4,
+                    "validation_outdoor_rmse": 3.4,
+                    "train_target_count": 100,
+                    "validation_target_count": 100,
+                    "improved_checkpoint": True,
+                    "pipeline_elapsed_seconds": 1,
+                },
+                {
+                    "global_epoch": 2,
+                    "stage": "tempo_bridge_50",
+                    "stage_epoch": 1,
+                    "train_loss": 0.25,
+                    "validation_loss": 0.2,
+                    "validation_indoor_rmse": 2.5,
+                    "validation_outdoor_rmse": 3.5,
+                    "train_target_count": 200,
+                    "validation_target_count": 200,
+                    "improved_checkpoint": True,
+                    "pipeline_elapsed_seconds": 2,
+                },
+            ]
+            output = root / "report.csv"
+
+            rows = write_masked_final_report(
+                output, checkpoint, training_data, metadata, metrics
+            )
+
+            self.assertTrue(output.is_file())
+            self.assertEqual(
+                [row["stage_type"] for row in rows], ["reconstruction", "bridge"]
+            )
+            self.assertTrue(rows[-1]["is_final_stage"])
+            self.assertEqual(rows[-1]["indoor_rmse_ug_m3"], 2.5)
 
 
 def _write_singular_training_data(
