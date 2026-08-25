@@ -38,12 +38,17 @@ METRIC_FIELDS = (
 
 @dataclass(frozen=True)
 class DiagnosticPaths:
-    metrics: Path
+    metrics: Path | None
     loss_curve: Path
     reconstructions: Path
 
 
-def diagnostic_paths(checkpoint: Path) -> DiagnosticPaths:
+def diagnostic_paths(
+    checkpoint: Path,
+    reconstruction_output: Path | None = None,
+    loss_curve_output: Path | None = None,
+    skip_metrics_csv: bool = False,
+) -> DiagnosticPaths:
     base = checkpoint.with_suffix("") if checkpoint.suffix else checkpoint
     run_directory = (
         checkpoint.parent.parent
@@ -51,9 +56,13 @@ def diagnostic_paths(checkpoint: Path) -> DiagnosticPaths:
         else checkpoint.parent
     )
     return DiagnosticPaths(
-        run_directory / "graphs" / f"{base.name}.metrics.csv",
-        run_directory / "graphs" / f"{base.name}.loss_curve.png",
-        run_directory / "inference" / f"{base.name}.reconstruction_examples.png",
+        None
+        if skip_metrics_csv
+        else run_directory / "graphs" / f"{base.name}.metrics.csv",
+        loss_curve_output
+        or run_directory / "graphs" / f"{base.name}.loss_curve.png",
+        reconstruction_output
+        or run_directory / "inference" / f"{base.name}.reconstruction_examples.png",
     )
 
 
@@ -105,6 +114,11 @@ def write_reconstruction_examples(
     normalizer: Normalizer,
     device: torch.device,
     seed: int,
+    *,
+    dataset_name: str,
+    model_name: str,
+    epoch: int,
+    best_validation: bool = False,
     maximum_examples: int = 4,
 ) -> None:
     indices = _example_indices(dataset, maximum_examples)
@@ -174,11 +188,14 @@ def write_reconstruction_examples(
             axis.xaxis.set_major_locator(locator)
             axis.xaxis.set_major_formatter(ConciseDateFormatter(locator))
     axes[0, 0].legend(ncol=4, fontsize=8, loc="upper left")
+    heading = "Best validation" if best_validation else "Fixed validation"
     figure.suptitle(
-        f"Fixed validation reconstructions — {stage}\nNatural missing observations appear as gaps",
+        f"{heading} reconstructions — {stage} — epoch {epoch}\n"
+        f"Dataset: {dataset_name} | Model: {model_name}\n"
+        "Natural missing observations appear as gaps",
         fontsize=12,
     )
-    figure.tight_layout(rect=(0, 0, 1, 0.96))
+    figure.tight_layout(rect=(0, 0, 1, 0.92))
     _save_figure(figure, path)
 
 

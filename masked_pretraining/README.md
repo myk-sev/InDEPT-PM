@@ -189,14 +189,14 @@ Each run writes:
   loss, validation RMSE by channel, target counts, and checkpoint improvement;
 - `<run>.loss_curve.png`: training and validation loss across all
   completed curriculum stages;
-- `<run>.reconstruction_examples.png`: four fixed validation windows
+- `<run>.<stage>.epoch_NNN.reconstruction_examples.png`: four fixed validation windows
   showing the full label history, model-visible history, artificially masked
-  labels, predictions, and natural missingness as gaps.
+  labels, predictions, and natural missingness as gaps. The title identifies
+  the dataset, model, masking stage, and selected epoch.
 
-The metrics CSV and loss graph are refreshed after every epoch. The unnumbered
-reconstruction plot is refreshed from the best validation checkpoint after
-each completed masking stage. Their absolute paths are stored in the checkpoint
-JSON.
+The metrics CSV and loss graph are refreshed after every epoch. After each
+masking-stage block, the reconstruction plot uses that block's lowest-validation
+epoch (20 epochs by default). Its absolute path is stored in the checkpoint JSON.
 
 To refresh the reconstruction plot during a stage, set an epoch interval:
 
@@ -210,8 +210,7 @@ This uses the same fixed validation windows and mask pattern every time, making
 changes between epochs directly comparable. Each periodic image is retained as
 `<run>.<stage>.epoch_NNN.reconstruction_examples.png`. The interval resets at
 the start of each masking stage. The default `0` disables periodic snapshots;
-the unnumbered image remains the best-checkpoint plot from the latest completed
-stage.
+the lowest-validation image is still written after each completed stage block.
 
 Resume a saved model for more epochs with `--resume`. Unless `--stages` is
 provided, training continues the masking stage recorded in the checkpoint.

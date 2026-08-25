@@ -286,6 +286,9 @@ def train(args: argparse.Namespace) -> None:
             if continuing_stage
             else None
         )
+        block_best_loss = float("inf")
+        block_best_state = None
+        block_best_epoch = 0
         for epoch in range(1, epoch_count + 1):
             train_metrics = run_epoch(
                 model,
@@ -308,10 +311,17 @@ def train(args: argparse.Namespace) -> None:
                 validation_masks,
                 target_mask_cache=validation_target_masks,
             )
+            block_improved = validation_metrics["loss"] < block_best_loss
             improved = validation_metrics["loss"] < best_loss - args.minimum_delta
+            if block_improved or improved:
+                candidate_state = _cpu_state(model)
+            if block_improved:
+                block_best_loss = validation_metrics["loss"]
+                block_best_state = candidate_state
+                block_best_epoch = epoch
             if improved:
                 best_loss = validation_metrics["loss"]
-                best_state = _cpu_state(model)
+                best_state = candidate_state
                 best_optimizer_state = copy.deepcopy(optimizer.state_dict())
                 best_metrics = validation_metrics
                 stale_epochs = 0
@@ -366,24 +376,40 @@ def train(args: argparse.Namespace) -> None:
                     normalizer,
                     device,
                     args.seed + stage_number * 1_000_000 + 1,
+                    dataset_name=args.training_data.name,
+                    model_name=args.model,
+                    epoch=epoch,
                 )
             if stop_early:
                 break
-        if best_state is None or best_optimizer_state is None or best_metrics is None:
+        if (
+            best_state is None
+            or best_optimizer_state is None
+            or best_metrics is None
+            or block_best_state is None
+        ):
             raise RuntimeError(f"stage {stage} produced no valid checkpoint")
-        model.load_state_dict(best_state)
-        optimizer.load_state_dict(best_optimizer_state)
         if stage not in completed:
             completed.append(stage)
+        best_reconstruction = reconstruction_snapshot_path(
+            diagnostics.reconstructions, stage, block_best_epoch
+        )
+        model.load_state_dict(block_best_state)
         write_reconstruction_examples(
-            diagnostics.reconstructions,
+            best_reconstruction,
             model,
             validation_data,
             stage,
             normalizer,
             device,
             args.seed + stage_number * 1_000_000 + 1,
+            dataset_name=args.training_data.name,
+            model_name=args.model,
+            epoch=block_best_epoch,
+            best_validation=True,
         )
+        model.load_state_dict(best_state)
+        optimizer.load_state_dict(best_optimizer_state)
         metadata = {
             "format_version": 3,
             "model_name": args.model,
@@ -446,7 +472,7 @@ def train(args: argparse.Namespace) -> None:
                 ),
                 "loss_curve_png": str(diagnostics.loss_curve.resolve()),
                 "reconstruction_examples_png": str(
-                    diagnostics.reconstructions.resolve()
+                    best_reconstruction.resolve()
                 ),
                 "reconstruction_every_epochs": args.reconstruction_every_epochs,
             },
