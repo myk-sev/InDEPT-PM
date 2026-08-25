@@ -97,7 +97,7 @@ The trainer selects the matching `bridge-forecast-*` model automatically when
 ```bat
 .venv\Scripts\python.exe pm25_transformer.py train ^
   --pretrained-checkpoint inference\checkpoints\k12_excl_fine_t_dual-encoder-cross-fusion.pt ^
-  --training-data inputs\unmasked_type\school_old_training_data_exclusion_informed_finetuned_cyclical.csv ^
+  --training-data inputs\unmasked_type\k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical.csv ^
   --history-initialization pretrained ^
   --epochs 50 ^
   --freeze-history-epochs 3 ^
