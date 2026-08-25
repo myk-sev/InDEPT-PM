@@ -26,6 +26,7 @@ TRAINING_COLUMNS = (
     "outdoor_pm25",
 )
 RESPONSIVENESS_TIERS = {"high", "moderate", "low", "unclassified"}
+SPLIT_CANDIDATES = 4096
 
 
 @dataclass(frozen=True)
@@ -328,9 +329,54 @@ def split_series(
     indices = list(range(len(database.series)))
     if len(indices) < 2:
         raise ValueError("at least two indoor sensors with eligible windows are required")
-    random.Random(seed).shuffle(indices)
-    validation_count = min(len(indices) - 1, max(1, round(len(indices) * validation_fraction)))
-    return indices[validation_count:], indices[:validation_count]
+    validation_count = min(
+        len(indices) - 1, max(1, round(len(indices) * validation_fraction))
+    )
+    features = _split_features(database)
+    totals = features.sum(axis=0)
+    usable = totals > 0
+    generator = random.Random(seed)
+    best_score, best_validation = math.inf, []
+    for _ in range(SPLIT_CANDIDATES):
+        validation = generator.sample(indices, validation_count)
+        shares = features[validation].sum(axis=0)[usable] / totals[usable]
+        score = float(
+            np.square((shares - validation_fraction) / validation_fraction).mean()
+        )
+        if score < best_score:
+            best_score, best_validation = score, validation
+    validation = sorted(best_validation)
+    validation_set = set(validation)
+    return [index for index in indices if index not in validation_set], validation
+
+
+def _split_features(database: PairDatabase) -> np.ndarray:
+    """Additive reconstruction features used to balance sensor-level splits."""
+    timestamps = np.array(
+        [
+            series.start_time + start * HOUR
+            for series in database.series
+            for start in series.window_starts
+        ],
+        dtype=np.int64,
+    )
+    time_quartiles = np.quantile(timestamps, (0.25, 0.5, 0.75))
+    features = np.zeros((len(database.series), 13), dtype=np.float64)
+    for index, series in enumerate(database.series):
+        for start in series.window_starts:
+            features[index, 0] += 1
+            timestamp = series.start_time + start * HOUR
+            time_bin = np.searchsorted(time_quartiles, timestamp, side="right")
+            features[index, 9 + time_bin] += 1
+            window = series.values[start : start + database.history_hours]
+            for channel, offset in ((0, 1), (1, 5)):
+                values = window[:, channel]
+                values = values[np.isfinite(values)].astype(np.float64)
+                features[index, offset] += values.size
+                features[index, offset + 1] += values.sum()
+                features[index, offset + 2] += np.count_nonzero(values >= 35)
+                features[index, offset + 3] += np.count_nonzero(values >= 100)
+    return features
 
 
 def file_sha256(path: Path) -> str:
