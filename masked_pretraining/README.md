@@ -111,8 +111,9 @@ Each hour has the final eight-feature contract: normalized outdoor and indoor
 PM2.5 followed by daily, weekly, and annual sine-cosine time features. Natural
 gaps and artificially hidden values use `-9` in the affected PM2.5 value slot.
 The artificial target mask remains outside the model, so only deliberately
-hidden known values contribute to loss. Splitting is by `indoor_sensor_id`, and
-normalization is fitted only on training sensors.
+hidden known values contribute to loss. Splitting is by `indoor_sensor_id`; a
+seeded candidate search balances eligible-window volume, PM2.5 mass and high
+events, and temporal quartiles. Normalization is fitted only on training sensors.
 
 The optional responsiveness curriculum classifies indoor/outdoor assignments.
 A window is admitted only if every assignment it touches has an included tier;
@@ -169,6 +170,10 @@ The transformer variants keep projections, positions, independent encoders,
 and fusion modules under the checkpoint's retained transfer prefixes. Their
 temporary indoor/outdoor reconstruction heads remain under the discarded
 prefix.
+
+The implemented supervised handoff, current-layout launchers, strict bridge
+family verification, horizon curriculum, random controls, and baseline
+evaluation are documented in [`../BRIDGE_FORECAST_WORKFLOW.md`](../BRIDGE_FORECAST_WORKFLOW.md).
 
 Add an architecture by decorating a `ModelConfig -> nn.Module` builder with
 `register_model()` in `models.py`; it must return `[batch, time, 2]`. Future

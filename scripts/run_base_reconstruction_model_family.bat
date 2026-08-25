@@ -2,7 +2,7 @@
 setlocal
 set "REPO_ROOT=%~dp0.."
 
-rem Usage: scripts\run_base_reconstruction_model_family.bat [device] [epochs_per_stage] [batch_size] [workers]
+rem Usage: scripts\run_base_reconstruction_model_family.bat [device] [epochs_per_stage] [batch_size] [workers] [torch_threads]
 rem Add --dry-run first to print the 22-run matrix without starting training.
 if /i "%~1"=="--dry-run" (
     set "DRY_RUN=1"
@@ -13,23 +13,30 @@ set "DEVICE=%~1"
 set "EPOCHS_PER_STAGE=%~2"
 set "BATCH_SIZE=%~3"
 set "WORKERS=%~4"
+set "TORCH_THREADS=%~5"
 if not defined DEVICE set "DEVICE=auto"
 if not defined EPOCHS_PER_STAGE set "EPOCHS_PER_STAGE=20"
 if not defined BATCH_SIZE set "BATCH_SIZE=64"
 if not defined WORKERS set "WORKERS=0"
+if not defined TORCH_THREADS set "TORCH_THREADS=0"
 
 set "START_DIR=%CD%"
 cd /d "%REPO_ROOT%" || exit /b 1
 
 set "PYTHON=.venv\Scripts\python.exe"
-set "OUTPUT_ROOT=masked_pretraining\runs\base_reconstruction"
-set "ALL_DATA=inputs\reconstruction\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
-set "K12_DATA=inputs\reconstruction\k12_exclusion_informed_finetuned_masked_training_data.csv"
+set "INFERENCE_ROOT=inference"
+set "CHECKPOINT_ROOT=%INFERENCE_ROOT%\checkpoints"
+set "GRAPH_ROOT=%INFERENCE_ROOT%\graphs"
+set "RECONSTRUCTION_ROOT=%INFERENCE_ROOT%\reconstructions"
+set "ALL_DATA=inputs\all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
+set "K12_DATA=inputs\k12_exclusion_informed_finetuned_masked_training_data.csv"
 
-for %%P in ("%PYTHON%" "%ALL_DATA%" "%K12_DATA%") do (
-    if not exist "%%~P" (
-        echo Required path not found: %%~P
-        goto :fail
+if not defined DRY_RUN (
+    for %%P in ("%PYTHON%" "%ALL_DATA%" "%K12_DATA%") do (
+        if not exist "%%~P" (
+            echo Required path not found: %%~P
+            goto :fail
+        )
     )
 )
 
@@ -44,14 +51,11 @@ exit /b 0
 :run_dataset
 set "DATASET=%~1"
 set "TRAINING_DATA=%~2"
-set "AUDIT_DIR=%OUTPUT_ROOT%\%DATASET%\audit"
 echo Dataset: %DATASET%
 echo Training data: %TRAINING_DATA%
 if not defined DRY_RUN (
-    if not exist "%AUDIT_DIR%" mkdir "%AUDIT_DIR%" || exit /b 1
     %PYTHON% -m masked_pretraining audit ^
-        --training-data "%TRAINING_DATA%" ^
-        --output "%AUDIT_DIR%\dataset_audit.json" >nul
+        --training-data "%TRAINING_DATA%" >nul
     if errorlevel 1 exit /b 1
 )
 
@@ -62,11 +66,16 @@ exit /b 0
 
 :run_model
 set "MODEL=%~1"
-set "RUN_ROOT=%OUTPUT_ROOT%\%DATASET%\%MODEL%"
+set "RUN_NAME=base_reconstruction__%DATASET%__%MODEL%"
+set "CHECKPOINT=%CHECKPOINT_ROOT%\%RUN_NAME%.pt"
+set "LOSS_CURVE=%GRAPH_ROOT%\%RUN_NAME%.loss_curve.png"
+set "RECONSTRUCTION_DIR=%RECONSTRUCTION_ROOT%\%RUN_NAME%"
 set /a TRAINING_COUNT+=1 >nul
 echo.
 echo Starting %DATASET% / %MODEL%
-echo Artifacts: %RUN_ROOT%
+echo Checkpoint: %CHECKPOINT%
+echo Loss graph: %LOSS_CURVE%
+echo Reconstructions: %RECONSTRUCTION_DIR%
 if defined DRY_RUN exit /b 0
 
 %PYTHON% -m masked_pretraining train ^
@@ -76,10 +85,15 @@ if defined DRY_RUN exit /b 0
     --epochs-per-stage "%EPOCHS_PER_STAGE%" ^
     --patience "%EPOCHS_PER_STAGE%" ^
     --reconstruction-every-epochs 5 ^
+    --reconstruction-output "%RECONSTRUCTION_DIR%\run.reconstruction_examples.png" ^
+    --loss-curve-output "%LOSS_CURVE%" ^
+    --skip-metrics-csv ^
+    --final-checkpoint-only ^
     --batch-size "%BATCH_SIZE%" ^
     --workers "%WORKERS%" ^
+    --torch-threads "%TORCH_THREADS%" ^
     --device "%DEVICE%" ^
-    --checkpoint "%RUN_ROOT%\checkpoints\run.pt"
+    --checkpoint "%CHECKPOINT%"
 if errorlevel 1 (
     echo Training failed for %DATASET% / %MODEL%.
     exit /b 1

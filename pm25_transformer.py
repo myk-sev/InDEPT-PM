@@ -6,7 +6,7 @@ import math
 import random
 import time
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,9 +28,14 @@ from pm25_models import (
     ModelConfig,
     PatchEmbedding,
     _missing_aware_history,
+    bridge_config_values,
+    bridge_forecast_name,
+    bridge_history_model_name,
     build_config,
     build_model,
+    load_bridge_checkpoint,
     model_names,
+    validate_bridge_checkpoint,
 )
 
 
@@ -48,6 +53,10 @@ class ZScores:
     history_outdoor_std: float
     forecast_mean: float
     forecast_std: float
+    encoder_indoor_mean: float | None = None
+    encoder_indoor_std: float | None = None
+    encoder_outdoor_mean: float | None = None
+    encoder_outdoor_std: float | None = None
 
     def denormalize_indoor(self, values: torch.Tensor) -> torch.Tensor:
         return values * self.indoor_std + self.indoor_mean
@@ -102,10 +111,24 @@ def normalize_batch(
     history = batch["history"].to(device, non_blocking=True).clone()
     forecast = batch["forecast"].to(device, non_blocking=True).clone()
     target = batch["target"].to(device, non_blocking=True).clone()
-    history[..., 0].sub_(zscores.history_outdoor_mean).div_(
-        zscores.history_outdoor_std
+    history[..., 0].sub_(
+        zscores.encoder_outdoor_mean
+        if zscores.encoder_outdoor_mean is not None
+        else zscores.history_outdoor_mean
+    ).div_(
+        zscores.encoder_outdoor_std
+        if zscores.encoder_outdoor_std is not None
+        else zscores.history_outdoor_std
     )
-    history[..., 1].sub_(zscores.indoor_mean).div_(zscores.indoor_std)
+    history[..., 1].sub_(
+        zscores.encoder_indoor_mean
+        if zscores.encoder_indoor_mean is not None
+        else zscores.indoor_mean
+    ).div_(
+        zscores.encoder_indoor_std
+        if zscores.encoder_indoor_std is not None
+        else zscores.indoor_std
+    )
     forecast[..., 0].sub_(zscores.forecast_mean).div_(zscores.forecast_std)
     target.sub_(zscores.indoor_mean).div_(zscores.indoor_std)
     return history, forecast, target
@@ -131,9 +154,15 @@ def run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
     gradient_clip: float = 0.0,
+    horizon: int | None = None,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
+    frozen_history = getattr(model, "history", None)
+    if training and frozen_history is not None and not any(
+        parameter.requires_grad for parameter in frozen_history.parameters()
+    ):
+        frozen_history.eval()
     loss_total = absolute_total = squared_total = 0.0
     count = 0
 
@@ -143,6 +172,9 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
             prediction = model(history, forecast)
+            if horizon is not None:
+                prediction = prediction[..., :horizon]
+                target = target[..., :horizon]
             loss = loss_function(prediction, target)
         if training:
             loss.backward()
@@ -181,6 +213,7 @@ def save_checkpoint(
     model_name: str = DEFAULT_MODEL,
     optimizer: torch.optim.Optimizer | None = None,
     training_state: dict | None = None,
+    pretraining: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp")
@@ -194,6 +227,8 @@ def save_checkpoint(
         "validation_loss": validation_loss,
         "model_state": model.state_dict(),
     }
+    if pretraining is not None:
+        checkpoint["pretraining"] = pretraining
     if optimizer is not None:
         checkpoint["optimizer_state"] = optimizer.state_dict()
     if training_state is not None:
@@ -576,9 +611,109 @@ def training_data_path(
     return None
 
 
+def bridge_history_zscores(zscores: ZScores, checkpoint: dict) -> ZScores:
+    normalizer = validate_bridge_checkpoint(checkpoint)["normalizer"]
+    means = normalizer["mean"]
+    deviations = normalizer["standard_deviation"]
+    return replace(
+        zscores,
+        encoder_outdoor_mean=float(means[0]),
+        encoder_outdoor_std=float(deviations[0]),
+        encoder_indoor_mean=float(means[1]),
+        encoder_indoor_std=float(deviations[1]),
+    )
+
+
+def resolve_horizon_schedule(
+    prediction_hours: int,
+    epochs: int,
+    horizons: list[int],
+    stage_epochs: list[int] | None,
+) -> list[int]:
+    if (
+        not horizons
+        or horizons != sorted(set(horizons))
+        or horizons[-1] != prediction_hours
+        or any(not 1 <= horizon <= prediction_hours for horizon in horizons)
+    ):
+        raise ValueError(
+            "forecast horizons must be unique, increasing, positive, and end at "
+            "prediction_hours"
+        )
+    if stage_epochs is None:
+        if horizons != [prediction_hours]:
+            raise ValueError(
+                "--horizon-stage-epochs is required for a multi-stage forecast curriculum"
+            )
+        return [prediction_hours] * epochs
+    if len(stage_epochs) != len(horizons) or any(value < 1 for value in stage_epochs):
+        raise ValueError(
+            "horizon stage epochs must be positive and match the forecast horizons"
+        )
+    if sum(stage_epochs) != epochs:
+        raise ValueError("horizon stage epochs must sum to --epochs")
+    return [
+        horizon
+        for horizon, count in zip(horizons, stage_epochs)
+        for _ in range(count)
+    ]
+
+
+def history_parameters(model: nn.Module) -> tuple[nn.Parameter, ...]:
+    getter = getattr(model, "history_parameters", None)
+    return tuple(getter()) if getter else ()
+
+
+def set_history_trainable(model: nn.Module, trainable: bool) -> int:
+    parameters = history_parameters(model)
+    for parameter in parameters:
+        parameter.requires_grad_(trainable)
+    return sum(parameter.numel() for parameter in parameters)
+
+
+def bridge_provenance(
+    path: Path,
+    checkpoint: dict,
+    weights_loaded: bool,
+    transferred_names: tuple[str, ...] = (),
+) -> dict:
+    metadata = validate_bridge_checkpoint(checkpoint)
+    return {
+        "checkpoint": str(path.resolve()),
+        "checkpoint_sha256": file_sha256(path),
+        "source_model_name": metadata["model_name"],
+        "source_stage": metadata["stage"],
+        "source_completed_stages": metadata["completed_stages"],
+        "source_training_data_sha256": metadata["training_data_sha256"],
+        "weights_loaded": weights_loaded,
+        "transferred_tensor_count": len(transferred_names),
+        "transferred_parameter_count": sum(
+            checkpoint["model_state"][name].numel() for name in transferred_names
+        ),
+    }
+
+
 def train(args: argparse.Namespace) -> None:
     training_data = training_data_path(args)
-    config = build_config(args.model, vars(args))
+    bridge_path = args.pretrained_checkpoint
+    bridge_checkpoint = load_bridge_checkpoint(bridge_path) if bridge_path else None
+    initialization = args.history_initialization or (
+        "pretrained" if bridge_checkpoint else "random"
+    )
+    if initialization == "pretrained" and bridge_checkpoint is None:
+        raise ValueError("pretrained history initialization requires a bridge checkpoint")
+    config_values = dict(vars(args))
+    if bridge_checkpoint:
+        source_name = bridge_checkpoint["metadata"]["model_name"]
+        required_model = bridge_forecast_name(source_name)
+        if args.model == DEFAULT_MODEL:
+            args.model = required_model
+        elif args.model != required_model:
+            raise ValueError(
+                f"bridge checkpoint requires --model {required_model}, got {args.model}"
+            )
+        config_values.update(bridge_config_values(bridge_checkpoint))
+    config = build_config(args.model, config_values)
     if args.epochs < 1 or args.batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
     if args.learning_rate <= 0 or args.weight_decay < 0:
@@ -589,6 +724,15 @@ def train(args: argparse.Namespace) -> None:
         )
     if args.checkpoint_every < 0:
         raise ValueError("checkpoint_every cannot be negative")
+    if args.freeze_history_epochs < 0:
+        raise ValueError("freeze_history_epochs cannot be negative")
+    forecast_horizons = args.forecast_horizons or [config.prediction_hours]
+    horizon_schedule = resolve_horizon_schedule(
+        config.prediction_hours,
+        args.epochs,
+        forecast_horizons,
+        args.horizon_stage_epochs,
+    )
 
     set_seed(args.seed)
     device = resolve_device(args.device)
@@ -611,6 +755,13 @@ def train(args: argparse.Namespace) -> None:
         "epochs": args.epochs,
         "device": args.device,
         "minimum_outdoor_history_hours": args.minimum_outdoor_history_hours,
+        "history_initialization": initialization,
+        "freeze_history_epochs": args.freeze_history_epochs,
+        "forecast_horizons": forecast_horizons,
+        "horizon_stage_epochs": args.horizon_stage_epochs,
+        "bridge_history_normalization": bool(
+            bridge_checkpoint and args.bridge_history_normalization
+        ),
     }
     if training_data is not None:
         training_config["training_data"] = str(training_data.resolve())
@@ -670,6 +821,8 @@ def train(args: argparse.Namespace) -> None:
             f"quota_per_cell={report['quota_per_cell']}"
         )
     loss_function = make_loss(args.loss, args.huber_delta)
+    pretraining = None
+    has_training_state = False
     if args.resume:
         resume_path = recovery_path if recovery_path.is_file() else checkpoint_path
         model, resumed_config, zscores, checkpoint = load_checkpoint(
@@ -683,9 +836,30 @@ def train(args: argparse.Namespace) -> None:
             raise ValueError("resume arguments do not match the recovery checkpoint")
         training_config["device"] = args.device
         training_config["epochs"] = args.epochs
+        pretraining = checkpoint.get("pretraining")
     else:
         zscores = fit_zscores(loaders.train)
-        model = build_model(args.model, config).to(device)
+        model = build_model(args.model, config)
+        transferred_names: tuple[str, ...] = ()
+        if bridge_checkpoint:
+            validate_bridge_checkpoint(
+                bridge_checkpoint,
+                bridge_history_model_name(args.model),
+                config,
+            )
+            if args.bridge_history_normalization:
+                zscores = bridge_history_zscores(zscores, bridge_checkpoint)
+            if initialization == "pretrained":
+                transferred_names = model.load_pretrained_history(bridge_checkpoint)
+            pretraining = bridge_provenance(
+                bridge_path,
+                bridge_checkpoint,
+                initialization == "pretrained",
+                transferred_names,
+            )
+        model = model.to(device)
+    if args.freeze_history_epochs and not history_parameters(model):
+        raise ValueError("freeze_history_epochs requires a bridge forecast model")
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
@@ -714,6 +888,14 @@ def train(args: argparse.Namespace) -> None:
         f"forecast mean={zscores.forecast_mean:.6g} "
         f"std={zscores.forecast_std:.6g}"
     )
+    if zscores.encoder_indoor_mean is not None:
+        print(
+            "bridge history z-score "
+            f"indoor mean={zscores.encoder_indoor_mean:.6g} "
+            f"std={zscores.encoder_indoor_std:.6g}; "
+            f"outdoor mean={zscores.encoder_outdoor_mean:.6g} "
+            f"std={zscores.encoder_outdoor_std:.6g}"
+        )
 
     if args.resume and has_training_state:
         state = checkpoint["training_state"]
@@ -759,8 +941,21 @@ def train(args: argparse.Namespace) -> None:
         stale_epochs = 0
         training_losses = []
         validation_losses = []
+    previous_horizon = (
+        state.get("forecast_horizon")
+        if args.resume and has_training_state
+        else horizon_schedule[start_epoch - 1] if start_epoch else None
+    )
     started = time.perf_counter()
     for epoch in range(start_epoch + 1, args.epochs + 1):
+        horizon = horizon_schedule[epoch - 1]
+        if horizon != previous_horizon:
+            best_loss = math.inf
+            stale_epochs = 0
+            previous_horizon = horizon
+            print(f"forecast_horizon={horizon} hours")
+        history_frozen = epoch <= args.freeze_history_epochs
+        transferred_parameter_count = set_history_trainable(model, not history_frozen)
         training = run_epoch(
             model,
             loaders.train,
@@ -769,9 +964,15 @@ def train(args: argparse.Namespace) -> None:
             device,
             optimizer,
             args.gradient_clip,
+            horizon,
         )
         validation = run_epoch(
-            model, loaders.validation, loss_function, zscores, device
+            model,
+            loaders.validation,
+            loss_function,
+            zscores,
+            device,
+            horizon=horizon,
         )
         training_losses.append(training["loss"])
         validation_losses.append(validation["loss"])
@@ -781,6 +982,8 @@ def train(args: argparse.Namespace) -> None:
         )
         print(
             f"epoch={epoch}/{args.epochs} "
+            f"horizon={horizon} "
+            f"history_frozen={history_frozen and bool(transferred_parameter_count)} "
             f"time_taken={format_duration(elapsed)} "
             f"ETA={format_duration(estimated_remaining)} "
             f"train_loss={training['loss']:.6g} "
@@ -804,6 +1007,7 @@ def train(args: argparse.Namespace) -> None:
                 epoch,
                 best_loss,
                 args.model,
+                pretraining=pretraining,
             )
         else:
             stale_epochs += 1
@@ -817,6 +1021,8 @@ def train(args: argparse.Namespace) -> None:
             "torch_random_state": torch.get_rng_state(),
             "loader_random_state": loaders.train.generator.get_state(),
             "device_type": device.type,
+            "forecast_horizon": horizon,
+            "history_frozen": history_frozen and bool(transferred_parameter_count),
         }
         if device.type != "cpu":
             state["device_random_state"] = getattr(
@@ -833,6 +1039,7 @@ def train(args: argparse.Namespace) -> None:
             args.model,
             optimizer,
             state,
+            pretraining,
         )
         if args.checkpoint_every and epoch % args.checkpoint_every == 0:
             periodic_path = checkpoint_path.with_name(
@@ -849,10 +1056,12 @@ def train(args: argparse.Namespace) -> None:
                 args.model,
                 optimizer,
                 state,
+                pretraining,
             )
             print(f"periodic_checkpoint={periodic_path}")
         if (
             args.early_stopping_patience
+            and horizon == config.prediction_hours
             and stale_epochs >= args.early_stopping_patience
         ):
             print(f"early stopping after {epoch} epochs")
@@ -1036,6 +1245,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--model", choices=model_names(), default=DEFAULT_MODEL
     )
     train_parser.add_argument(
+        "--pretrained-checkpoint",
+        type=Path,
+        help=(
+            "completed tempo_bridge_86 checkpoint; the matching bridge forecast "
+            "model is selected automatically when --model is omitted"
+        ),
+    )
+    train_parser.add_argument(
+        "--history-initialization",
+        choices=("pretrained", "random"),
+        help=(
+            "load bridge history weights or retain random history weights; the "
+            "latter supports an architecture-matched control"
+        ),
+    )
+    train_parser.add_argument(
+        "--bridge-history-normalization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="apply the bridge checkpoint's indoor/outdoor history z-scores",
+    )
+    train_parser.add_argument(
         "--training-data",
         "--training-csv",
         dest="training_data",
@@ -1077,6 +1308,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_stream_arguments(train_parser, "decoder", False)
     train_parser.add_argument("--batch-size", type=int, default=64)
     train_parser.add_argument("--epochs", type=int, default=50)
+    train_parser.add_argument(
+        "--freeze-history-epochs",
+        type=int,
+        default=0,
+        help="freeze the bridge history encoder for the first N forecast epochs",
+    )
+    train_parser.add_argument(
+        "--forecast-horizons",
+        type=int,
+        nargs="+",
+        metavar="H",
+        help="increasing prefix-loss horizons ending at prediction_hours",
+    )
+    train_parser.add_argument(
+        "--horizon-stage-epochs",
+        type=int,
+        nargs="+",
+        metavar="N",
+        help="epoch count per forecast horizon; values must sum to --epochs",
+    )
     train_parser.add_argument("--learning-rate", type=float, default=1e-4)
     train_parser.add_argument("--weight-decay", type=float, default=1e-4)
     train_parser.add_argument("--gradient-clip", type=float, default=1.0)

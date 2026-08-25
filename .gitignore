@@ -4,6 +4,9 @@
 backups/
 __pycache__/
 test*
+!masked_pretraining/tests/
+masked_pretraining/tests/*
+!masked_pretraining/tests/test_forecast_transfer.py
 *.py[cod]
 *.ps1
 *.pt

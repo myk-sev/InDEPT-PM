@@ -1,3 +1,13 @@
+from .bridge_forecaster import (
+    BridgeForecastConfig,
+    BridgeForecaster,
+    bridge_config_values,
+    bridge_forecast_name,
+    bridge_forecast_names,
+    bridge_history_model_name,
+    load_bridge_checkpoint,
+    validate_bridge_checkpoint,
+)
 from .cyclical_transformers import (
     CyclicalDualEncoderPatchTransformer,
     CyclicalDualEncoderTransformer,
@@ -47,6 +57,8 @@ from .separate_stream_fusion import (
 )
 
 ModelConfig = (
+    BridgeForecastConfig
+    |
     PatchTransformerConfig
     | TimestepTransformerConfig
     | CyclicalPatchTransformerConfig
@@ -117,12 +129,22 @@ register_model(
     AbsoluteDeltaCyclicalPatchTST,
     CyclicalPatchTSTConfig,
 )
+for _bridge_name in bridge_forecast_names():
+    _history_name = bridge_history_model_name(_bridge_name)
+    register_model(
+        _bridge_name,
+        lambda config, name=_history_name: BridgeForecaster(name, config),
+        BridgeForecastConfig,
+    )
+del _bridge_name, _history_name
 
 __all__ = [
     "AbsoluteDeltaCyclicalDualEncoderPatchTransformer",
     "AbsoluteDeltaCyclicalDualEncoderTransformer",
     "AbsoluteDeltaCyclicalPatchTST",
     "AbsoluteDeltaPatchTST",
+    "BridgeForecastConfig",
+    "BridgeForecaster",
     "DEFAULT_MODEL",
     "MODEL_SPECS",
     "ChannelIndependentPatchEmbedding",
@@ -149,8 +171,14 @@ __all__ = [
     "TimestepEmbedding",
     "TimestepTransformerConfig",
     "_missing_aware_history",
+    "bridge_config_values",
+    "bridge_forecast_name",
+    "bridge_forecast_names",
+    "bridge_history_model_name",
     "build_config",
     "build_model",
     "model_names",
+    "load_bridge_checkpoint",
     "register_model",
+    "validate_bridge_checkpoint",
 ]

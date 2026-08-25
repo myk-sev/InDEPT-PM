@@ -79,10 +79,12 @@ class SingleSelfAttentionEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, config.layers)
         self.reconstruction_head = nn.Linear(config.model_dim, config.output_channels)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
         _validate_features(features, self.config)
-        encoded = self.encoder(self.input_projection(features) + self.position)
-        return self.reconstruction_head(encoded)
+        return self.encoder(self.input_projection(features) + self.position)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.reconstruction_head(self.encode(features))
 
 
 class _PairedReconstructor(nn.Module):
@@ -161,11 +163,12 @@ class DualEncoderSelfFusion(_DualEncoderBackbone):
         super().__init__(config)
         self.encoder["fusion"] = _encoder(config, layers=1)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
         outdoor, indoor = self._encode_streams(features)
-        outdoor, indoor = self.encoder["fusion"](
-            torch.cat((outdoor, indoor), dim=1)
-        ).split(self.config.history_hours, dim=1)
+        return self.encoder["fusion"](torch.cat((outdoor, indoor), dim=1))
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        outdoor, indoor = self.encode(features).split(self.config.history_hours, dim=1)
         return self._reconstruct(outdoor, indoor)
 
 
@@ -176,12 +179,19 @@ class DualEncoderCrossFusion(_DualEncoderBackbone):
         super().__init__(config)
         self.encoder["fusion"] = _CrossAttentionFusion(config)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
         outdoor, indoor = self._encode_streams(features)
-        return self._reconstruct(
-            self.encoder["fusion"](outdoor, indoor),
-            self.encoder["fusion"](indoor, outdoor),
+        return torch.cat(
+            (
+                self.encoder["fusion"](outdoor, indoor),
+                self.encoder["fusion"](indoor, outdoor),
+            ),
+            dim=1,
         )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        outdoor, indoor = self.encode(features).split(self.config.history_hours, dim=1)
+        return self._reconstruct(outdoor, indoor)
 
 
 class DualEncoderSelfFusionOutdoorAvailability(DualEncoderSelfFusion):
@@ -248,7 +258,7 @@ class SeparateStreamSelfFusion(_PairedReconstructor):
         self.reconstruction_head = _reconstruction_heads(config)
         nn.init.trunc_normal_(self.position, std=0.02)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
         _validate_features(features, self.config)
         streams = (
             self.encoder[name](self.input_projection[name](values) + self.position)
@@ -265,9 +275,12 @@ class SeparateStreamSelfFusion(_PairedReconstructor):
                 ),
             )
         )
-        _, indoor, outdoor = self.encoder["fusion"](
-            torch.cat(tuple(streams), dim=1)
-        ).split(self.config.history_hours, dim=1)
+        return self.encoder["fusion"](torch.cat(tuple(streams), dim=1))
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        _, indoor, outdoor = self.encode(features).split(
+            self.config.history_hours, dim=1
+        )
         return self._reconstruct(outdoor, indoor)
 
 
@@ -328,10 +341,13 @@ class GruReconstructor(nn.Module):
             config.model_dim * 2, config.output_channels
         )
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
         _validate_features(features, self.config)
         encoded, _ = self.encoder(self.input_projection(features))
-        return self.reconstruction_head(encoded)
+        return encoded
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.reconstruction_head(self.encode(features))
 
 
 def _validate_features(features: torch.Tensor, config: ModelConfig) -> None:
