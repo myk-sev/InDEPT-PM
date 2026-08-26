@@ -16,11 +16,17 @@ DEFAULT_CHECKPOINT_ROOT = ROOT / "inference" / "checkpoints"
 DEFAULT_DATASETS = (
     (
         "all_excl_fine_t",
-        ROOT / "inputs" / "all_sensors_exclusion_informed_finetuned_masked_training_data.csv",
+        ROOT
+        / "inputs"
+        / "reconstruction"
+        / "all_sensors_exclusion_informed_finetuned_masked_training_data.csv",
     ),
     (
         "k12_excl_fine_t",
-        ROOT / "inputs" / "k12_exclusion_informed_finetuned_masked_training_data.csv",
+        ROOT
+        / "inputs"
+        / "reconstruction"
+        / "k12_exclusion_informed_finetuned_masked_training_data.csv",
     ),
 )
 
