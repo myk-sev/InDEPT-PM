@@ -21,6 +21,7 @@ from masked_pretraining.models import (
 from masked_pretraining.train import write_masked_final_report
 from pm25_models import (
     BridgeForecastConfig,
+    bridge_config_values,
     bridge_forecast_name,
     build_model,
     validate_bridge_checkpoint,
@@ -144,6 +145,37 @@ class ForecastTransferTests(unittest.TestCase):
         self.assertTrue(transferred)
         self.assertFalse(any(name.startswith("reconstruction_head.") for name in transferred))
         self.assertEqual(set(transferred), set(model.history.state_dict()))
+
+    def test_non_default_history_hyperparameters_transfer_for_every_model(self):
+        config = BridgeForecastConfig(
+            history_hours=12,
+            prediction_hours=6,
+            model_dim=16,
+            layers=2,
+            heads=4,
+            forecast_embedding_dim=8,
+            forecast_heads=2,
+            forecast_head_dim=4,
+            decoder_embedding_dim=8,
+            decoder_heads=2,
+            decoder_head_dim=4,
+        )
+        checkpoint = _checkpoint("dual-encoder-cross-fusion", config)
+
+        self.assertEqual(
+            bridge_config_values(checkpoint),
+            {
+                "history_hours": 12,
+                "model_dim": 16,
+                "layers": 2,
+                "heads": 4,
+                "dropout": 0.1,
+            },
+        )
+        for model_name in history_model_names():
+            checkpoint = _checkpoint(model_name, config)
+            model = build_model(bridge_forecast_name(model_name), config)
+            self.assertTrue(model.load_pretrained_history(checkpoint))
 
     def test_transfer_rejects_incomplete_bridge(self):
         config = _config()

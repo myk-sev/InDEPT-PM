@@ -90,6 +90,28 @@ Every successful training run must also complete:
 
 Failure of training, inference, or evaluation stops the matrix.
 
+### Hyperparameter bridge checkpoints
+
+The 72 all-sensor hyperparameter checkpoints use a separate downstream matrix:
+
+```bat
+scripts\run_all_sensor_reconstruction_hyperparameter_grid_forecast.bat --dry-run auto 64 0
+scripts\run_all_sensor_reconstruction_hyperparameter_grid_forecast.bat auto 64 0
+```
+
+This launcher first validates all 72 completed bridge checkpoints before starting
+any downstream work. It checks the full bridge contract plus the model name,
+learning rate, model dimension, depth, and head count encoded in each artifact
+name. Each checkpoint then supplies its own history configuration to the matching
+`bridge-forecast-*` model. The launcher transfers the trained history weights,
+trains the forecaster on the all-sensor forecasting CSV, runs cached inference,
+and writes held-out evaluation results. Existing forecast or recovery checkpoints
+are resumed automatically.
+
+These are 72 pretrained-history experiments, not paired random controls. Their
+purpose is to compare the completed hyperparameter histories on the final
+forecasting task when reconstruction loss alone did not identify a winner.
+
 Before the trainer exits, it reloads the selected validation-best checkpoint
 and writes `inference\reports\<dataset_model>.csv`. The CSV has one row for
 each validation, temporal-test, and location-test horizon at 3, 6, 12, 24, and
