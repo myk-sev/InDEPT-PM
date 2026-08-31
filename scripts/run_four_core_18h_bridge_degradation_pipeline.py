@@ -43,7 +43,7 @@ RECONSTRUCTION_DATA = (
 )
 FORECAST_DATA = (
     REPOSITORY_ROOT
-    / "inputs/forecasting/all_old_training_data_exclusion_informed_finetuned_cyclical.csv"
+    / "inputs/forecasting/k12_exclusion_informed_finetuned_tempo_naqfc_forecast_training_cyclical_naqfc_event_ge100_excluded.csv"
 )
 PYTHON = REPOSITORY_ROOT / ".venv/Scripts/python.exe"
 CHECKPOINT_ROOT = REPOSITORY_ROOT / "inference/checkpoints"
