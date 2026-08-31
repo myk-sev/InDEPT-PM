@@ -58,6 +58,7 @@ class DualEncoderLoaders:
     temporal_test: DataLoader
     location_test: DataLoader
     balance_report: dict[str, object] | None = None
+    initial_training_exclusion_report: dict[str, int] | None = None
 
 
 class DualEncoderDataset(Dataset):
@@ -271,14 +272,15 @@ class SingularTrainingDataset(Dataset):
             raise ValueError(f"singular training CSV contains no rows: {path}")
 
         stored_history_hours = table["history_hours"].to_numpy()
-        stored_forecast_hours = table["prediction_hours"].to_numpy()
+        stored_forecast_hours = np.unique(table["prediction_hours"].to_numpy())
         if np.any(stored_history_hours != history_hours):
             raise ValueError(
                 f"singular training CSV history_hours does not match {history_hours}"
             )
-        if np.any(stored_forecast_hours != forecast_hours):
+        if len(stored_forecast_hours) != 1 or stored_forecast_hours[0] < forecast_hours:
             raise ValueError(
-                f"singular training CSV prediction_hours does not match {forecast_hours}"
+                "singular training CSV prediction_hours is shorter than or "
+                f"inconsistent with {forecast_hours}"
             )
 
         histories = np.column_stack(
@@ -349,8 +351,10 @@ class SingularTrainingDataset(Dataset):
             raise ValueError(f"singular training CSV has inconsistent model_name values: {path}")
 
         self.path = path
+        self.sample_ids = sample_ids
         self.history_hours = history_hours
         self.forecast_hours = forecast_hours
+        self.source_forecast_hours = int(stored_forecast_hours[0])
         self.cyclical_time = cyclical_time
         self.source_model_name = next(iter(model_names))
         self.location_ids = tuple(location_lookup)
@@ -381,6 +385,8 @@ def create_singular_data_loaders(
     seed: int = 42,
     num_workers: int = 0,
     pin_memory: bool = False,
+    initial_training_interval_audit: str | Path | None = None,
+    training_data_sha256: str | None = None,
 ) -> DualEncoderLoaders:
     """Create loaders from the split labels stored in the singular CSV."""
     if batch_size < 1 or num_workers < 0:
@@ -392,14 +398,84 @@ def create_singular_data_loaders(
         "persistent_workers": num_workers > 0,
     }
     generator = torch.Generator().manual_seed(seed)
+    train_indices = dataset.split_indices["train"]
+    exclusion_report = None
+    if initial_training_interval_audit is not None:
+        excluded = _read_initial_training_interval_audit(
+            Path(initial_training_interval_audit), dataset, training_data_sha256
+        )
+        train_indices = train_indices[~np.isin(train_indices, excluded)]
+        if not len(train_indices):
+            raise ValueError("initial training interval audit excludes every train sample")
+        exclusion_report = {
+            "eligible_training_intervals": len(dataset.split_indices["train"]),
+            "excluded_training_intervals": len(excluded),
+            "retained_training_intervals": len(train_indices),
+        }
     loader = lambda split, **options: DataLoader(
-        Subset(dataset, dataset.split_indices[split]), **common, **options
+        Subset(dataset, train_indices if split == "train" else dataset.split_indices[split]),
+        **common,
+        **options,
     )
     return DualEncoderLoaders(
         train=loader("train", shuffle=True, generator=generator),
         validation=loader("validation"),
         temporal_test=loader("temporal_test"),
         location_test=loader("location_test"),
+        initial_training_exclusion_report=exclusion_report,
+    )
+
+
+def _read_initial_training_interval_audit(
+    path: Path,
+    dataset: SingularTrainingDataset,
+    training_data_sha256: str | None,
+) -> np.ndarray:
+    if not path.is_file():
+        raise FileNotFoundError(f"initial training interval audit not found: {path}")
+    required = {
+        "sample_index",
+        "split",
+        "training_data_sha256",
+        "exclude_from_initial_training",
+    }
+    decisions: dict[int, bool] = {}
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                "initial training interval audit is missing columns: "
+                + ", ".join(sorted(missing))
+            )
+        for number, row in enumerate(reader, 2):
+            try:
+                sample_id = int(row["sample_index"])
+                decision = row["exclude_from_initial_training"].strip().lower()
+                if row["split"] != "train" or decision not in {"true", "false"}:
+                    raise ValueError
+                if training_data_sha256 and row["training_data_sha256"] != training_data_sha256:
+                    raise ValueError("training data SHA-256 mismatch")
+                if sample_id in decisions:
+                    raise ValueError("duplicate sample_index")
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid initial training interval audit row {number} in {path}: {error}"
+                ) from error
+            decisions[sample_id] = decision == "true"
+
+    sample_to_row = {int(sample_id): row for row, sample_id in enumerate(dataset.sample_ids)}
+    expected = {
+        int(dataset.sample_ids[row]) for row in dataset.split_indices["train"]
+    }
+    if decisions.keys() != expected:
+        raise ValueError(
+            "initial training interval audit sample_index values do not exactly match "
+            "the singular CSV train split"
+        )
+    return np.array(
+        [sample_to_row[sample_id] for sample_id, exclude in decisions.items() if exclude],
+        dtype=np.int64,
     )
 
 

@@ -432,6 +432,29 @@ def write_forecast_metrics(path: Path, rows: list[dict[str, object]]) -> None:
     os.replace(temporary, path)
 
 
+def read_history_metrics(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"history metrics not found: {path}")
+    with path.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    required = {"global_epoch", "stage", "train_loss", "validation_loss"}
+    if not rows or not required <= rows[0].keys():
+        raise ValueError("history metrics have an incompatible schema")
+    parsed = [
+        {
+            "global_epoch": int(row["global_epoch"]),
+            "stage": row["stage"],
+            "train_loss": float(row["train_loss"]),
+            "validation_loss": float(row["validation_loss"]),
+        }
+        for row in rows
+    ]
+    epochs = [int(row["global_epoch"]) for row in parsed]
+    if epochs != sorted(set(epochs)):
+        raise ValueError("history metric epochs must be unique and increasing")
+    return parsed
+
+
 def load_checkpoint(
     path: Path, device: torch.device
 ) -> tuple[nn.Module, ModelConfig, ZScores, dict]:
@@ -636,32 +659,145 @@ def plot_training_losses(
     validation_losses: list[float],
     training_metrics: dict[str, float],
     validation_metrics: dict[str, float],
+    dataset_name: str,
+    model_name: str,
+    forecast_horizons: list[int],
+    loss_name: str,
+    history_metrics: list[dict[str, object]] | None = None,
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
     from matplotlib import pyplot as plt
 
-    epochs = range(1, len(training_losses) + 1)
-    figure, axis = plt.subplots(figsize=(8, 5))
-    for name, losses, marker, metrics in (
-        ("Training", training_losses, "o", training_metrics),
-        ("Validation", validation_losses, "s", validation_metrics),
+    history_metrics = history_metrics or []
+    if history_metrics:
+        history_epochs = [int(row["global_epoch"]) for row in history_metrics]
+        forecast_epochs = range(
+            history_epochs[-1] + 1,
+            history_epochs[-1] + len(training_losses) + 1,
+        )
+        figure, (history_axis, forecast_axis) = plt.subplots(
+            1,
+            2,
+            figsize=(14, 6),
+            gridspec_kw={
+                "width_ratios": (len(history_metrics), len(training_losses)),
+                "wspace": 0.16,
+            },
+        )
+        history_axis.plot(
+            history_epochs,
+            [row["train_loss"] for row in history_metrics],
+            color="#1f77b4",
+            label="History training",
+        )
+        history_axis.plot(
+            history_epochs,
+            [row["validation_loss"] for row in history_metrics],
+            color="#ff7f0e",
+            label="History validation",
+        )
+        _label_loss_segments(
+            history_axis,
+            history_epochs,
+            [str(row["stage"]) for row in history_metrics],
+        )
+        history_axis.set(
+            xlabel="Pipeline epoch",
+            ylabel="Masked reconstruction MSE",
+            title="RECONSTRUCTION + SYNTHETIC BRIDGE",
+        )
+        forecast_axis.set(
+            xlabel="Pipeline epoch",
+            ylabel=f"Forecast {loss_name.upper()} loss",
+            title="FORECASTING",
+        )
+        _label_loss_segments(
+            forecast_axis,
+            list(forecast_epochs),
+            [f"{horizon}h" for horizon in forecast_horizons],
+        )
+    else:
+        forecast_epochs = range(1, len(training_losses) + 1)
+        figure, forecast_axis = plt.subplots(figsize=(8, 5))
+        forecast_axis.set(xlabel="Epoch", ylabel=f"{loss_name.upper()} loss")
+        _label_loss_segments(
+            forecast_axis,
+            list(forecast_epochs),
+            [f"{horizon}h" for horizon in forecast_horizons],
+        )
+    for name, losses, marker, metrics, color in (
+        ("Forecast training", training_losses, "o", training_metrics, "#1f77b4"),
+        ("Forecast validation", validation_losses, "s", validation_metrics, "#ff7f0e"),
     ):
         label = (
             f"{name} — final loss={metrics['loss']:.4g}, "
             f"MAE={metrics['mae']:.4g}, MSE={metrics['mse']:.4g}, "
             f"RMSE={metrics['rmse']:.4g}"
         )
-        axis.plot(epochs, losses, marker=marker, label=label)
-    axis.set(xlabel="Epoch", ylabel="Loss", title="Training and validation loss")
-    axis.set_xticks(list(epochs))
-    axis.grid(alpha=0.3)
-    axis.legend()
-    figure.tight_layout()
+        forecast_axis.plot(
+            forecast_epochs, losses, marker=marker, color=color, label=label
+        )
+    figure.suptitle(
+        "Transfer training loss\n"
+        f"Dataset: {dataset_name}\n"
+        f"Model: {model_name}",
+        fontsize=13,
+    )
+    for axis in figure.axes:
+        axis.grid(alpha=0.3)
+    if history_metrics:
+        history_axis.legend(loc="lower left", fontsize=8)
+        handles, labels = forecast_axis.get_legend_handles_labels()
+        figure.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.81),
+            ncol=2,
+            frameon=False,
+            fontsize=8,
+        )
+        figure.text(
+            0.5,
+            0.015,
+            "Loss objective and normalization change at the history-transfer boundary.",
+            ha="center",
+            color="0.35",
+            fontsize=9,
+        )
+        figure.subplots_adjust(
+            top=0.72, bottom=0.14, left=0.07, right=0.98, wspace=0.20
+        )
+    else:
+        forecast_axis.legend(fontsize=8)
+        figure.tight_layout(rect=(0, 0.04, 1, 0.88))
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=150)
     plt.close(figure)
+
+
+def _label_loss_segments(axis, epochs: list[int], labels: list[str]) -> None:
+    start = 0
+    for index in range(1, len(labels) + 1):
+        if index < len(labels) and labels[index] == labels[start]:
+            continue
+        if start:
+            axis.axvline(epochs[start] - 0.5, color="0.75", linewidth=1)
+        label = labels[start].replace("tempo_bridge_", "bridge ").replace("_", " ")
+        axis.text(
+            (epochs[start] + epochs[index - 1]) / 2,
+            0.98,
+            label,
+            color="0.35",
+            fontsize=7,
+            ha="center",
+            va="top",
+            rotation=90 if len(set(labels)) > 6 else 0,
+            transform=axis.get_xaxis_transform(),
+        )
+        start = index
 
 
 def resolve_device(name: str) -> torch.device:
@@ -743,6 +879,12 @@ def build_singular_loaders(
     training_config: dict,
     device: torch.device,
 ) -> tuple[SingularTrainingDataset, DualEncoderLoaders]:
+    audit = training_config.get("initial_training_interval_audit")
+    audit_path = Path(audit) if audit else None
+    if audit_path is not None:
+        expected = training_config.get("initial_training_interval_audit_sha256")
+        if expected is not None and file_sha256(audit_path) != expected:
+            raise ValueError("initial training interval audit does not match the checkpoint")
     dataset = SingularTrainingDataset(
         training_data,
         history_hours=config.history_hours,
@@ -755,6 +897,8 @@ def build_singular_loaders(
         seed=training_config["seed"],
         num_workers=training_config["num_workers"],
         pin_memory=device.type in {"cuda", "xpu"},
+        initial_training_interval_audit=audit_path,
+        training_data_sha256=training_config.get("training_data_sha256"),
     )
     return dataset, loaders
 
@@ -769,6 +913,7 @@ def training_data_path(
         args.forecast_root,
     )
     training_data = args.training_data
+    interval_audit = getattr(args, "initial_training_interval_audit", None)
     if training_data is None and not any(legacy) and recorded and recorded.get(
         "training_data"
     ):
@@ -780,6 +925,8 @@ def training_data_path(
                 "balance, or exclusion arguments"
             )
         return training_data
+    if interval_audit is not None:
+        raise ValueError("--initial-training-interval-audit requires --training-data")
     if not all(legacy):
         raise ValueError(
             "provide --training-data or all of --pairs, --indoor-history, "
@@ -874,6 +1021,23 @@ def train(args: argparse.Namespace) -> None:
     training_data = training_data_path(args)
     bridge_path = args.pretrained_checkpoint
     bridge_checkpoint = load_bridge_checkpoint(bridge_path) if bridge_path else None
+    history_metrics = (
+        read_history_metrics(args.history_metrics) if args.history_metrics else []
+    )
+    if history_metrics and bridge_checkpoint is None:
+        raise ValueError("history metrics require a pretrained bridge checkpoint")
+    if history_metrics:
+        recorded_stages = {str(row["stage"]) for row in history_metrics}
+        missing_stages = [
+            stage
+            for stage in bridge_checkpoint["metadata"]["completed_stages"]
+            if stage not in recorded_stages
+        ]
+        if missing_stages:
+            raise ValueError(
+                "history metrics are missing completed stages: "
+                + ", ".join(missing_stages)
+            )
     initialization = args.history_initialization or (
         "pretrained" if bridge_checkpoint else "random"
     )
@@ -953,6 +1117,13 @@ def train(args: argparse.Namespace) -> None:
     if training_data is not None:
         training_config["training_data"] = str(training_data.resolve())
         training_config["training_data_sha256"] = file_sha256(training_data)
+        if args.initial_training_interval_audit is not None:
+            training_config["initial_training_interval_audit"] = str(
+                args.initial_training_interval_audit.resolve()
+            )
+            training_config["initial_training_interval_audit_sha256"] = file_sha256(
+                args.initial_training_interval_audit
+            )
     else:
         training_config.update(
             {
@@ -968,6 +1139,9 @@ def train(args: argparse.Namespace) -> None:
                 ),
             }
         )
+    if args.history_metrics is not None:
+        training_config["history_metrics"] = str(args.history_metrics.resolve())
+        training_config["history_metrics_sha256"] = file_sha256(args.history_metrics)
     if training_data is None and args.balanced_training_index is not None:
         training_config["balanced_training_index"] = str(
             args.balanced_training_index.resolve()
@@ -984,6 +1158,8 @@ def train(args: argparse.Namespace) -> None:
         dataset, loaders = build_singular_loaders(
             training_data, config, training_config, device
         )
+        if dataset.source_forecast_hours != config.prediction_hours:
+            training_config["source_prediction_hours"] = dataset.source_forecast_hours
     else:
         dataset, loaders = build_loaders(
             args.pairs,
@@ -1006,6 +1182,15 @@ def train(args: argparse.Namespace) -> None:
             f"eligible={report['training_eligible_anchors']} "
             f"selected={report['selected_training_anchors']} "
             f"quota_per_cell={report['quota_per_cell']}"
+        )
+    if loaders.initial_training_exclusion_report is not None:
+        report = loaders.initial_training_exclusion_report
+        training_config["initial_training_exclusion_report"] = report
+        print(
+            "initial training interval filter "
+            f"eligible={report['eligible_training_intervals']} "
+            f"excluded={report['excluded_training_intervals']} "
+            f"retained={report['retained_training_intervals']}"
         )
     loss_function = make_loss(args.loss, args.huber_delta)
     pretraining = None
@@ -1270,7 +1455,16 @@ def train(args: argparse.Namespace) -> None:
         )
         write_forecast_metrics(metrics_path, metrics)
         plot_training_losses(
-            loss_plot, training_losses, validation_losses, training, validation
+            loss_plot,
+            training_losses,
+            validation_losses,
+            training,
+            validation,
+            source.name,
+            args.model,
+            [int(row["forecast_horizon"]) for row in metrics],
+            args.loss,
+            history_metrics,
         )
         if args.checkpoint_every and epoch % args.checkpoint_every == 0:
             periodic_path = checkpoint_path.with_name(
@@ -1521,6 +1715,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="singular CSV containing materialized windows and split labels",
     )
+    train_parser.add_argument(
+        "--initial-training-interval-audit",
+        type=Path,
+        help=(
+            "NAQFC/TEMPO interval audit; rows marked for exclusion are removed "
+            "only from the initial train split"
+        ),
+    )
     train_parser.add_argument("--pairs", type=Path)
     train_parser.add_argument(
         "--indoor-history", type=Path, action="append"
@@ -1551,6 +1753,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics-output",
         type=Path,
         help="metrics CSV path; defaults to inference/metrics/DATASET_MODEL.csv",
+    )
+    train_parser.add_argument(
+        "--history-metrics",
+        type=Path,
+        help=(
+            "masked reconstruction/bridge metrics CSV to prepend to the forecast "
+            "loss graph"
+        ),
     )
     train_parser.add_argument(
         "--report-output",
