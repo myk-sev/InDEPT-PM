@@ -151,19 +151,21 @@ def remaining_history_stages(
     path: Path, source_model: str, curriculum: tuple[str, ...]
 ) -> tuple[str, ...]:
     checkpoint, metadata = load_history(path, source_model)
-    completed = tuple(dict.fromkeys(metadata.get("completed_stages", ())))
-    if (
-        not completed
-        or completed != curriculum[: len(completed)]
-        or metadata.get("stage") != completed[-1]
-    ):
-        raise ValueError(f"history curriculum is not a completed prefix: {path}")
-    if len(completed) == len(curriculum):
+    completed = set(metadata.get("completed_stages", ()))
+    expected = set(curriculum)
+    if not completed or completed - expected:
+        raise ValueError(f"history checkpoint has invalid completed stages: {path}")
+    if expected <= completed:
         source_stage = "bridge" if curriculum == ALL_HISTORY_STAGES else "reconstruction"
         validate_bridge_checkpoint(
             checkpoint, source_model, source_stage=source_stage
         )
-    return curriculum[len(completed) :]
+        return ()
+    if completed != set(curriculum[: len(completed)]) or metadata.get(
+        "stage"
+    ) not in completed:
+        raise ValueError(f"history curriculum is not safely resumable: {path}")
+    return tuple(stage for stage in curriculum if stage not in completed)
 
 
 def reconstruction_command(run_paths: Artifacts, args: argparse.Namespace) -> list[str]:
