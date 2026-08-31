@@ -3,6 +3,7 @@ setlocal
 set "REPO_ROOT=%~dp0.."
 
 rem Trains the four core bridge-forecast models through a 24-hour horizon.
+rem Uses the model-dim=64 sweep run: learning rate 3e-4, dimension 64, depth 3, heads 4.
 rem Usage: scripts\run_four_core_24h_forecast_models.bat [--dry-run] [device] [batch_size] [workers]
 if /i "%~1"=="--dry-run" (
     set "DRY_RUN=1"
@@ -29,6 +30,7 @@ set "METRICS_ROOT=inference\metrics"
 set "GRAPH_ROOT=inference\graphs"
 set "REPORT_ROOT=inference\reports"
 set "FORECAST_ROOT=inference\forecasts"
+set "HYPERPARAMETER_STEM=all_excl_fine_t_hp_model-dim_64_lr3e-4_dim64_depth3_heads4"
 
 for %%P in ("%PYTHON%" "%TRAINER%" "%TRAINING_DATA%" "%CACHE%") do (
     if not exist "%%~P" (
@@ -67,11 +69,11 @@ exit /b 0
 
 :set_model
 set "SOURCE_MODEL=%~1"
-set "SOURCE_ARTIFACT=all_excl_fine_t_%SOURCE_MODEL%"
+set "SOURCE_ARTIFACT=%HYPERPARAMETER_STEM%_%SOURCE_MODEL%"
 set "BRIDGE_CHECKPOINT=%CHECKPOINT_ROOT%\%SOURCE_ARTIFACT%_bridge.pt"
 set "HISTORY_METRICS=%METRICS_ROOT%\%SOURCE_ARTIFACT%.csv"
 set "FORECAST_MODEL=bridge-forecast-%SOURCE_MODEL%"
-set "ARTIFACT_NAME=all_excl_fine_t_%FORECAST_MODEL%-pretrained-24h"
+set "ARTIFACT_NAME=%HYPERPARAMETER_STEM%_%FORECAST_MODEL%-pretrained-24h"
 set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
 set "RECOVERY_CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.last.pt"
 set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
