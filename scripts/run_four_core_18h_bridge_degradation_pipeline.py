@@ -36,6 +36,7 @@ MODELS = (
 )
 ALL_HISTORY_STAGES = STAGES + TEMPO_BRIDGE_STAGES
 HYPERPARAMETER_STEM = "all_excl_fine_t_hp_model-dim_64_lr3e-4_dim64_depth3_heads4"
+EXPERIMENT_SUFFIX = "bridge-degradation-18h"
 RECONSTRUCTION_DATA = (
     REPOSITORY_ROOT
     / "inputs/reconstruction/all_sensors_exclusion_informed_finetuned_masked_training_data.csv"
@@ -62,7 +63,7 @@ class Artifacts:
 
     @property
     def source_name(self) -> str:
-        return f"{HYPERPARAMETER_STEM}_{self.source_model}"
+        return f"{HYPERPARAMETER_STEM}_{self.source_model}_{EXPERIMENT_SUFFIX}"
 
     @property
     def forecast_model(self) -> str:
@@ -81,7 +82,10 @@ class Artifacts:
         return METRICS_ROOT / f"{self.source_name}.csv"
 
     def forecast_name(self, source_stage: str) -> str:
-        return f"{HYPERPARAMETER_STEM}_{self.forecast_model}-from-{source_stage}-18h"
+        return (
+            f"{HYPERPARAMETER_STEM}_{self.forecast_model}_{EXPERIMENT_SUFFIX}"
+            f"-from-{source_stage}"
+        )
 
     def forecast_checkpoint(self, source_stage: str) -> Path:
         return CHECKPOINT_ROOT / f"{self.forecast_name(source_stage)}.pt"
