@@ -72,6 +72,20 @@ def stack_graphs(output: Path, graphs: list[tuple[Path, str]]) -> None:
     stacked.save(output, dpi=(150, 150))
 
 
+def _compatible_shape(name: str, actual: object, expected: tuple[int, ...]) -> bool:
+    try:
+        actual = tuple(actual)
+    except TypeError:
+        return False
+    if name == "history":
+        return actual == expected
+    return (
+        len(actual) == len(expected)
+        and actual[0] >= expected[0]
+        and actual[1:] == expected[1:]
+    )
+
+
 def validate_data_contract(cache: dict, records: list[dict], config: object) -> None:
     cyclical = getattr(config, "cyclical_time", False)
     expected = {
@@ -81,8 +95,17 @@ def validate_data_contract(cache: dict, records: list[dict], config: object) -> 
         "cyclical_time": cyclical,
     }
     contract = cache.get("data_contract")
-    if contract is not None and contract != expected:
-        raise ValueError("cache data contract is incompatible with the checkpoint")
+    if contract is not None:
+        compatible = contract.get("cyclical_time") == cyclical and all(
+            _compatible_shape(name, contract.get(f"{name}_shape"), shape)
+            for name, shape in (
+                ("history", expected["history_shape"]),
+                ("forecast", expected["forecast_shape"]),
+                ("target", expected["target_shape"]),
+            )
+        )
+        if not compatible:
+            raise ValueError("cache data contract is incompatible with the checkpoint")
 
     for record in records:
         sample = record.get("sample")
@@ -90,13 +113,20 @@ def validate_data_contract(cache: dict, records: list[dict], config: object) -> 
             raise ValueError("inference cache contains an invalid sample")
         for name in ("history", "forecast", "target"):
             value = sample.get(name)
-            if not isinstance(value, torch.Tensor) or tuple(value.shape) != expected[
-                f"{name}_shape"
-            ]:
+            if not isinstance(value, torch.Tensor) or not _compatible_shape(
+                name, value.shape, expected[f"{name}_shape"]
+            ):
                 raise ValueError(
                     f"cached sample {record.get('sample_index')} has an "
                     f"incompatible {name} shape"
                 )
+
+
+def forecast_prefix(sample: dict, prediction_hours: int) -> dict:
+    return sample | {
+        "forecast": sample["forecast"][:prediction_hours],
+        "target": sample["target"][:prediction_hours],
+    }
 
 
 def main() -> None:
@@ -136,7 +166,10 @@ def main() -> None:
     model_name = checkpoint.get("model_name", DEFAULT_MODEL)
     validate_data_contract(cache, records, config)
 
-    samples = [record["sample"] for record in selected]
+    samples = [
+        forecast_prefix(record["sample"], config.prediction_hours)
+        for record in selected
+    ]
     batch = {
         name: torch.stack([sample[name] for sample in samples])
         for name in ("history", "forecast", "target")
@@ -150,7 +183,7 @@ def main() -> None:
 
     split = cache["split"]
     graphs: list[tuple[Path, str]] = []
-    for record, prediction in zip(selected, predictions):
+    for record, sample, prediction in zip(selected, samples, predictions):
         index = record["sample_index"]
         name = record.get("name")
         filename = (
@@ -161,7 +194,7 @@ def main() -> None:
         output = args.output_dir / f"{model_name}_{filename}"
         plot_prediction(
             output,
-            record["sample"],
+            sample,
             prediction,
             config,
             record["location_id"],
