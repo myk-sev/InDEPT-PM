@@ -70,7 +70,7 @@ exit /b 0
 :set_model
 set "SOURCE_MODEL=%~1"
 set "SOURCE_ARTIFACT=%HYPERPARAMETER_STEM%_%SOURCE_MODEL%"
-set "BRIDGE_CHECKPOINT=%CHECKPOINT_ROOT%\%SOURCE_ARTIFACT%_bridge.pt"
+set "PRETRAINED_CHECKPOINT=%CHECKPOINT_ROOT%\%SOURCE_ARTIFACT%.pt"
 set "HISTORY_METRICS=%METRICS_ROOT%\%SOURCE_ARTIFACT%.csv"
 set "FORECAST_MODEL=bridge-forecast-%SOURCE_MODEL%"
 set "ARTIFACT_NAME=%HYPERPARAMETER_STEM%_%FORECAST_MODEL%-pretrained-24h"
@@ -83,7 +83,7 @@ set "FORECAST_DIR=%FORECAST_ROOT%\%ARTIFACT_NAME%"
 exit /b 0
 
 :check_inputs
-for %%P in ("%BRIDGE_CHECKPOINT%" "%HISTORY_METRICS%") do (
+for %%P in ("%PRETRAINED_CHECKPOINT%" "%HISTORY_METRICS%") do (
     if not exist "%%~P" (
         echo Required path not found: %%~P
         exit /b 1
@@ -100,7 +100,7 @@ echo Forecast model: %FORECAST_MODEL%
 echo Prediction window: 24 hours
 echo Epochs: 50
 echo Training data: %TRAINING_DATA%
-echo Bridge checkpoint: %BRIDGE_CHECKPOINT%
+echo Pretrained checkpoint: %PRETRAINED_CHECKPOINT%
 echo Forecast checkpoint: %CHECKPOINT%
 echo Metrics: %METRICS%
 echo Loss graph: %LOSS_CURVE%
@@ -114,7 +114,7 @@ if exist "%RECOVERY_CHECKPOINT%" set "RESUME_FLAG=--resume"
 
 %PYTHON% %TRAINER% train ^
     --model "%FORECAST_MODEL%" ^
-    --pretrained-checkpoint "%BRIDGE_CHECKPOINT%" ^
+    --pretrained-checkpoint "%PRETRAINED_CHECKPOINT%" ^
     --history-initialization pretrained ^
     --history-metrics "%HISTORY_METRICS%" ^
     --training-data "%TRAINING_DATA%" ^
