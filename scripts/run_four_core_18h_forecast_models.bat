@@ -109,8 +109,17 @@ echo Inference examples: %FORECAST_DIR%
 if defined DRY_RUN exit /b 0
 
 set "RESUME_FLAG="
-if exist "%CHECKPOINT%" set "RESUME_FLAG=--resume"
-if exist "%RECOVERY_CHECKPOINT%" set "RESUME_FLAG=--resume"
+set "RESUME_CHECKPOINT="
+if exist "%CHECKPOINT%" set "RESUME_CHECKPOINT=%CHECKPOINT%"
+if exist "%RECOVERY_CHECKPOINT%" set "RESUME_CHECKPOINT=%RECOVERY_CHECKPOINT%"
+if defined RESUME_CHECKPOINT (
+    call :checkpoint_complete "%RESUME_CHECKPOINT%" 50
+    if not errorlevel 1 (
+        echo Training already completed; continuing with inference.
+        goto :run_inference
+    )
+    set "RESUME_FLAG=--resume"
+)
 
 %PYTHON% %TRAINER% train ^
     --model "%FORECAST_MODEL%" ^
@@ -136,6 +145,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:run_inference
 %PYTHON% -m inference.run_cached_inference ^
     --cache "%CACHE%" ^
     --checkpoint "%CHECKPOINT%" ^
@@ -146,6 +156,10 @@ if errorlevel 1 (
     exit /b 1
 )
 exit /b 0
+
+:checkpoint_complete
+%PYTHON% -c "import sys, torch; checkpoint=torch.load(sys.argv[1], map_location='cpu', weights_only=False); sys.exit(int(checkpoint.get('epoch', 0)) < int(sys.argv[2]))" "%~1" "%~2" >nul
+exit /b %ERRORLEVEL%
 
 :fail
 cd /d "%START_DIR%"
