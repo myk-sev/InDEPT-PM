@@ -1,13 +1,15 @@
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
 
+from data_loader import SingularTrainingDataset
 from evaluate_bridge_forecast import fit_linear_baseline, linear_prediction, metric_report
 from inference.artifacts import artifact_paths, dataset_model_stem
+from inference.run_cached_inference import forecast_prefix, validate_data_contract
 from masked_pretraining.masking import (
     STAGES,
     TEMPO_BRIDGE_MISSING_FRACTIONS,
@@ -103,6 +105,40 @@ def _checkpoint(model_name: str, config: BridgeForecastConfig) -> dict:
 
 
 class ForecastTransferTests(unittest.TestCase):
+    def test_wider_forecast_data_and_cache_supply_a_prediction_prefix(self):
+        config = _config()
+        wider = replace(config, prediction_hours=config.prediction_hours + 2)
+        sample = {
+            "history": torch.zeros(config.history_hours, 8),
+            "forecast": torch.zeros(wider.prediction_hours, 7),
+            "target": torch.zeros(wider.prediction_hours),
+        }
+        cache = {
+            "data_contract": {
+                "history_shape": sample["history"].shape,
+                "forecast_shape": sample["forecast"].shape,
+                "target_shape": sample["target"].shape,
+                "cyclical_time": True,
+            }
+        }
+
+        validate_data_contract(cache, [{"sample_index": 0, "sample": sample}], config)
+        prefix = forecast_prefix(sample, config.prediction_hours)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "training.csv"
+            _write_singular_training_data(path, wider)
+            dataset = SingularTrainingDataset(
+                path,
+                history_hours=config.history_hours,
+                forecast_hours=config.prediction_hours,
+                cyclical_time=True,
+            )
+
+        self.assertEqual(dataset.source_forecast_hours, wider.prediction_hours)
+        self.assertEqual(prefix["forecast"].shape, (config.prediction_hours, 7))
+        self.assertEqual(prefix["target"].shape, (config.prediction_hours,))
+        self.assertEqual(sample["forecast"].shape, (wider.prediction_hours, 7))
+
     def test_artifact_contract_uses_dedicated_inference_folders(self):
         stem = dataset_model_stem(
             Path("k12_excl_fine_t_masked_training_data.csv"),
@@ -184,6 +220,57 @@ class ForecastTransferTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "full curriculum"):
             validate_bridge_checkpoint(checkpoint)
+
+    def test_transfer_accepts_completed_reconstruction_when_explicit(self):
+        config = _config()
+        checkpoint = _checkpoint("single-self-attention-encoder", config)
+        checkpoint["metadata"].update(
+            stage=STAGES[-1], completed_stages=list(STAGES)
+        )
+        model = build_model(
+            bridge_forecast_name(checkpoint["metadata"]["model_name"]), config
+        )
+
+        transferred = model.load_pretrained_history(
+            checkpoint, source_stage="reconstruction"
+        )
+
+        self.assertTrue(transferred)
+        self.assertEqual(
+            validate_bridge_checkpoint(
+                checkpoint, source_stage="reconstruction"
+            )["stage"],
+            STAGES[-1],
+        )
+
+    def test_reconstruction_selector_rejects_bridge_checkpoint(self):
+        checkpoint = _checkpoint("single-self-attention-encoder", _config())
+
+        with self.assertRaisesRegex(ValueError, "reconstruction checkpoint"):
+            validate_bridge_checkpoint(
+                checkpoint, source_stage="reconstruction"
+            )
+
+    def test_pretrained_checkpoint_stage_defaults_to_bridge(self):
+        parser = build_parser()
+
+        default = parser.parse_args(
+            ["train", "--pretrained-checkpoint", "source.pt"]
+        )
+        reconstruction = parser.parse_args(
+            [
+                "train",
+                "--pretrained-checkpoint",
+                "source.pt",
+                "--pretrained-checkpoint-stage",
+                "reconstruction",
+            ]
+        )
+
+        self.assertEqual(default.pretrained_checkpoint_stage, "bridge")
+        self.assertEqual(
+            reconstruction.pretrained_checkpoint_stage, "reconstruction"
+        )
 
     def test_bridge_normalizer_is_used_only_for_history_encoder(self):
         config = _config()
@@ -272,14 +359,39 @@ class ForecastTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bridge_path = root / "bridge.pt"
+            history_metrics = root / "history_metrics.csv"
             training_data = root / "training.csv"
             torch.save(_checkpoint("single-self-attention-encoder", config), bridge_path)
+            with history_metrics.open("w", encoding="utf-8", newline="") as target:
+                writer = csv.DictWriter(
+                    target,
+                    fieldnames=(
+                        "global_epoch",
+                        "stage",
+                        "train_loss",
+                        "validation_loss",
+                    ),
+                )
+                writer.writeheader()
+                writer.writerows(
+                    {
+                        "global_epoch": epoch,
+                        "stage": stage,
+                        "train_loss": 1 / epoch,
+                        "validation_loss": 1.1 / epoch,
+                    }
+                    for epoch, stage in enumerate(
+                        STAGES + TEMPO_BRIDGE_STAGES, start=1
+                    )
+                )
             _write_singular_training_data(training_data, config)
             args = build_parser().parse_args(
                 [
                     "train",
                     "--pretrained-checkpoint",
                     str(bridge_path),
+                    "--history-metrics",
+                    str(history_metrics),
                     "--training-data",
                     str(training_data),
                     "--history-hours",
@@ -361,6 +473,60 @@ class ForecastTransferTests(unittest.TestCase):
         )
         self.assertTrue(checkpoint["pretraining"]["weights_loaded"])
         self.assertEqual(checkpoint["training_config"]["forecast_horizons"], [6])
+        self.assertEqual(
+            checkpoint["training_config"]["history_metrics"],
+            str(history_metrics.resolve()),
+        )
+        self.assertIn("history_metrics_sha256", checkpoint["training_config"])
+
+    def test_one_epoch_transfer_can_start_from_reconstruction(self):
+        config = _config()
+        source = _checkpoint("single-self-attention-encoder", config)
+        source["metadata"].update(
+            stage=STAGES[-1], completed_stages=list(STAGES)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "reconstruction.pt"
+            training_data = root / "training.csv"
+            checkpoint_path = root / "forecast.pt"
+            torch.save(source, source_path)
+            _write_singular_training_data(training_data, config)
+            args = build_parser().parse_args(
+                [
+                    "train",
+                    "--pretrained-checkpoint",
+                    str(source_path),
+                    "--pretrained-checkpoint-stage",
+                    "reconstruction",
+                    "--training-data",
+                    str(training_data),
+                    "--prediction-hours",
+                    "6",
+                    "--epochs",
+                    "1",
+                    "--batch-size",
+                    "1",
+                    "--device",
+                    "cpu",
+                    "--checkpoint",
+                    str(checkpoint_path),
+                    "--metrics-output",
+                    str(root / "metrics.csv"),
+                    "--loss-plot",
+                    str(root / "loss.png"),
+                    "--report-output",
+                    str(root / "report.csv"),
+                ]
+            )
+
+            train(args)
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+
+        self.assertTrue(checkpoint["pretraining"]["weights_loaded"])
+        self.assertEqual(checkpoint["pretraining"]["source_stage"], STAGES[-1])
 
     def test_masked_report_contains_reconstruction_and_bridge_stages(self):
         with tempfile.TemporaryDirectory() as directory:

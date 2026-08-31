@@ -181,8 +181,12 @@ class BridgeForecaster(nn.Module):
     def history_parameters(self):
         return self.history.parameters()
 
-    def load_pretrained_history(self, checkpoint: dict) -> tuple[str, ...]:
-        validate_bridge_checkpoint(checkpoint, self.history_model_name, self.config)
+    def load_pretrained_history(
+        self, checkpoint: dict, source_stage: str = "bridge"
+    ) -> tuple[str, ...]:
+        validate_bridge_checkpoint(
+            checkpoint, self.history_model_name, self.config, source_stage
+        )
         source = {
             name: value
             for name, value in checkpoint["model_state"].items()
@@ -214,7 +218,10 @@ def validate_bridge_checkpoint(
     checkpoint: dict,
     history_model_name: str | None = None,
     config: BridgeForecastConfig | None = None,
+    source_stage: str = "bridge",
 ) -> dict:
+    if source_stage not in ("bridge", "reconstruction"):
+        raise ValueError(f"unknown pretrained checkpoint stage: {source_stage}")
     if not isinstance(checkpoint, dict) or not isinstance(
         checkpoint.get("model_state"), dict
     ) or not isinstance(checkpoint.get("metadata"), dict):
@@ -228,18 +235,22 @@ def validate_bridge_checkpoint(
             f"bridge checkpoint model is {source_name}, expected {history_model_name}"
         )
     completed = set(metadata.get("completed_stages", ()))
-    required = set(STAGES + TEMPO_BRIDGE_STAGES)
-    if metadata.get("stage") != TEMPO_BRIDGE_STAGES[-1] or not required <= completed:
-        raise ValueError("bridge checkpoint did not complete the full curriculum")
-    bridge = metadata.get("masking", {}).get("tempo_missingness_bridge", {})
-    if not bridge.get("enabled") or not bridge.get("synthetic_only"):
-        raise ValueError("bridge checkpoint is missing synthetic bridge metadata")
-    if bridge.get("tempo_data_used") is not False:
-        raise ValueError("bridge checkpoint must not claim TEMPO training data")
-    if bridge.get("outdoor_artificial_missing_fractions") != dict(
-        TEMPO_BRIDGE_MISSING_FRACTIONS
-    ):
-        raise ValueError("bridge checkpoint has invalid missingness fractions")
+    required_stages = STAGES + (TEMPO_BRIDGE_STAGES if source_stage == "bridge" else ())
+    final_stage = required_stages[-1]
+    if metadata.get("stage") != final_stage or not set(required_stages) <= completed:
+        raise ValueError(
+            f"{source_stage} checkpoint did not complete the full curriculum"
+        )
+    if source_stage == "bridge":
+        bridge = metadata.get("masking", {}).get("tempo_missingness_bridge", {})
+        if not bridge.get("enabled") or not bridge.get("synthetic_only"):
+            raise ValueError("bridge checkpoint is missing synthetic bridge metadata")
+        if bridge.get("tempo_data_used") is not False:
+            raise ValueError("bridge checkpoint must not claim TEMPO training data")
+        if bridge.get("outdoor_artificial_missing_fractions") != dict(
+            TEMPO_BRIDGE_MISSING_FRACTIONS
+        ):
+            raise ValueError("bridge checkpoint has invalid missingness fractions")
     transfer = metadata.get("transfer", {})
     if transfer.get("input_feature_order") != [
         "outdoor_value",
@@ -264,16 +275,18 @@ def validate_bridge_checkpoint(
     return metadata
 
 
-def load_bridge_checkpoint(path: Path) -> dict:
+def load_bridge_checkpoint(path: Path, source_stage: str = "bridge") -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"bridge checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    validate_bridge_checkpoint(checkpoint)
+    validate_bridge_checkpoint(checkpoint, source_stage=source_stage)
     return checkpoint
 
 
-def bridge_config_values(checkpoint: dict) -> dict[str, int | float]:
-    metadata = validate_bridge_checkpoint(checkpoint)
+def bridge_config_values(
+    checkpoint: dict, source_stage: str = "bridge"
+) -> dict[str, int | float]:
+    metadata = validate_bridge_checkpoint(checkpoint, source_stage=source_stage)
     source = metadata["model_config"]
     return {
         "history_hours": source["history_hours"],

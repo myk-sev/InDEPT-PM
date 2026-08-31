@@ -935,8 +935,12 @@ def training_data_path(
     return None
 
 
-def bridge_history_zscores(zscores: ZScores, checkpoint: dict) -> ZScores:
-    normalizer = validate_bridge_checkpoint(checkpoint)["normalizer"]
+def bridge_history_zscores(
+    zscores: ZScores, checkpoint: dict, source_stage: str = "bridge"
+) -> ZScores:
+    normalizer = validate_bridge_checkpoint(
+        checkpoint, source_stage=source_stage
+    )["normalizer"]
     means = normalizer["mean"]
     deviations = normalizer["standard_deviation"]
     return replace(
@@ -1000,8 +1004,9 @@ def bridge_provenance(
     checkpoint: dict,
     weights_loaded: bool,
     transferred_names: tuple[str, ...] = (),
+    source_stage: str = "bridge",
 ) -> dict:
-    metadata = validate_bridge_checkpoint(checkpoint)
+    metadata = validate_bridge_checkpoint(checkpoint, source_stage=source_stage)
     return {
         "checkpoint": str(path.resolve()),
         "checkpoint_sha256": file_sha256(path),
@@ -1020,7 +1025,10 @@ def bridge_provenance(
 def train(args: argparse.Namespace) -> None:
     training_data = training_data_path(args)
     bridge_path = args.pretrained_checkpoint
-    bridge_checkpoint = load_bridge_checkpoint(bridge_path) if bridge_path else None
+    source_stage = args.pretrained_checkpoint_stage
+    bridge_checkpoint = (
+        load_bridge_checkpoint(bridge_path, source_stage) if bridge_path else None
+    )
     history_metrics = (
         read_history_metrics(args.history_metrics) if args.history_metrics else []
     )
@@ -1053,7 +1061,7 @@ def train(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"bridge checkpoint requires --model {required_model}, got {args.model}"
             )
-        config_values.update(bridge_config_values(bridge_checkpoint))
+        config_values.update(bridge_config_values(bridge_checkpoint, source_stage))
     config = build_config(args.model, config_values)
     if args.epochs < 1 or args.batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
@@ -1218,16 +1226,22 @@ def train(args: argparse.Namespace) -> None:
                 bridge_checkpoint,
                 bridge_history_model_name(args.model),
                 config,
+                source_stage,
             )
             if args.bridge_history_normalization:
-                zscores = bridge_history_zscores(zscores, bridge_checkpoint)
+                zscores = bridge_history_zscores(
+                    zscores, bridge_checkpoint, source_stage
+                )
             if initialization == "pretrained":
-                transferred_names = model.load_pretrained_history(bridge_checkpoint)
+                transferred_names = model.load_pretrained_history(
+                    bridge_checkpoint, source_stage
+                )
             pretraining = bridge_provenance(
                 bridge_path,
                 bridge_checkpoint,
                 initialization == "pretrained",
                 transferred_names,
+                source_stage,
             )
         model = model.to(device)
     if args.freeze_history_epochs and not history_parameters(model):
@@ -1690,9 +1704,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--pretrained-checkpoint",
         type=Path,
         help=(
-            "completed tempo_bridge_86 checkpoint; the matching bridge forecast "
+            "completed bridge or reconstruction checkpoint; the matching forecast "
             "model is selected automatically when --model is omitted"
         ),
+    )
+    train_parser.add_argument(
+        "--pretrained-checkpoint-stage",
+        choices=("bridge", "reconstruction"),
+        default="bridge",
+        help="curriculum stage required from --pretrained-checkpoint",
     )
     train_parser.add_argument(
         "--history-initialization",
