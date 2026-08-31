@@ -38,6 +38,10 @@ for %%P in ("%PYTHON%" "%TRAINER%" "%TRAINING_DATA%" "%CACHE%") do (
     )
 )
 
+if not defined DRY_RUN (
+    call :check_inference_contract || goto :fail
+)
+
 set "TRAINING_COUNT=0"
 for %%M in (
     gru
@@ -121,6 +125,15 @@ if errorlevel 1 (
     --device "%DEVICE%"
 if errorlevel 1 (
     echo Fresh forecast inference failed for %SOURCE_MODEL%.
+    exit /b 1
+)
+exit /b 0
+
+:check_inference_contract
+%PYTHON% -c "from types import SimpleNamespace; import torch; from inference.run_cached_inference import validate_data_contract; config=SimpleNamespace(history_hours=168, prediction_hours=18, cyclical_time=True); sample={'history': torch.zeros(168, 8), 'forecast': torch.zeros(36, 7), 'target': torch.zeros(36)}; cache={'data_contract': {'history_shape': (168, 8), 'forecast_shape': (36, 7), 'target_shape': (36,), 'cyclical_time': True}}; validate_data_contract(cache, [{'sample_index': 0, 'sample': sample}], config)" >nul 2>nul
+if errorlevel 1 (
+    echo inference\run_cached_inference.py does not support an 18-hour prefix of the wider cache.
+    echo Update inference\run_cached_inference.py before starting training.
     exit /b 1
 )
 exit /b 0
