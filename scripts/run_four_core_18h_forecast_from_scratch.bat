@@ -4,7 +4,7 @@ set "REPO_ROOT=%~dp0.."
 
 rem Trains the four core forecast architectures from random initialization.
 rem No reconstruction or bridge checkpoint is opened.
-rem Usage: scripts\run_four_core_24h_forecast_from_scratch.bat [--dry-run] [device] [batch_size] [workers]
+rem Usage: scripts\run_four_core_18h_forecast_from_scratch.bat [--dry-run] [device] [batch_size] [workers]
 if /i "%~1"=="--dry-run" (
     set "DRY_RUN=1"
     shift
@@ -48,14 +48,14 @@ for %%M in (
     call :run_model "%%M" || goto :fail
 )
 
-echo Completed %TRAINING_COUNT% fresh core 24-hour forecast training runs.
+echo Completed %TRAINING_COUNT% fresh core 18-hour forecast training runs.
 cd /d "%START_DIR%"
 exit /b 0
 
 :run_model
 set "SOURCE_MODEL=%~1"
 set "FORECAST_MODEL=bridge-forecast-%SOURCE_MODEL%"
-set "ARTIFACT_NAME=all_excl_fine_t_%FORECAST_MODEL%-from-scratch-24h"
+set "ARTIFACT_NAME=all_excl_fine_t_%FORECAST_MODEL%-from-scratch-18h"
 set "CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.pt"
 set "RECOVERY_CHECKPOINT=%CHECKPOINT_ROOT%\%ARTIFACT_NAME%.last.pt"
 set "METRICS=%METRICS_ROOT%\%ARTIFACT_NAME%.csv"
@@ -69,7 +69,7 @@ echo Run %TRAINING_COUNT% of 4
 echo History model: %SOURCE_MODEL%
 echo Forecast model: %FORECAST_MODEL%
 echo History initialization: random
-echo Prediction window: 24 hours
+echo Prediction window: 18 hours
 echo Epochs: 50
 echo Training data: %TRAINING_DATA%
 echo Forecast checkpoint: %CHECKPOINT%
@@ -96,9 +96,9 @@ if defined RESUME_CHECKPOINT (
     --model "%FORECAST_MODEL%" ^
     --history-initialization random ^
     --training-data "%TRAINING_DATA%" ^
-    --prediction-hours 24 ^
+    --prediction-hours 18 ^
     --epochs 50 ^
-    --forecast-horizons 3 6 12 24 ^
+    --forecast-horizons 3 6 12 18 ^
     --horizon-stage-epochs 5 5 10 30 ^
     --early-stopping-patience 0 ^
     --batch-size "%BATCH_SIZE%" ^
